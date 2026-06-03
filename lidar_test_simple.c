@@ -6,7 +6,7 @@
 
 #include "lidar_test_simple.h"
 
-extern UART_HandleTypeDef huart1;  /* -> Pi      460800 baud */
+extern UART_HandleTypeDef huart1;  /* -> Pi      115200 baud */
 extern UART_HandleTypeDef huart2;  /* <- VB22A   115200 baud */
 
 /* ----------------------------------------------------------
