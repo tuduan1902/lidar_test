@@ -1,101 +1,119 @@
 /**
  * lidar_test_simple.c
- * Doc VB22A qua USART2, gui packet qua USART1 len Pi.
- * Khong motor, khong encoder, khong angle.
+ * Doc VB22A (460800 baud, frame 4 bytes) -> gui packet Jetson (115200 baud)
  */
 
 #include "lidar_test_simple.h"
+#include <string.h>
 
-/* CubeIDE/Keil tao trong main.c */
-extern UART_HandleTypeDef huart1;  /* -> Pi  921600 */
-extern UART_HandleTypeDef huart2;  /* <- VB22A 115200 */
+extern UART_HandleTypeDef huart1;  /* -> Jetson  115200 */
+extern UART_HandleTypeDef huart2;  /* <->VB22A   460800 */
+
+#define LED_ON()  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET)
+#define LED_OFF() HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET)
 
 /* ----------------------------------------------------------
- * Doc 1 frame VB22A
- * VB22A chay continuous 200Hz, khong can gui trigger
+ * Gui lenh toi VB22A
  * ---------------------------------------------------------- */
-static uint16_t vb22a_read(void)
-{
+static void vb22a_send_cmd(uint8_t* cmd, uint8_t len) {
+    HAL_UART_Transmit(&huart2, cmd, len, 100);
+}
+
+/* ----------------------------------------------------------
+ * Doc 1 frame VB22A (4 bytes)
+ * Frame: [0x5C | dist_L dist_H | checksum]
+ * checksum = ~(dist_L + dist_H) & 0xFF
+ * ---------------------------------------------------------- */
+static uint16_t vb22a_read(void) {
     uint8_t f[VB22A_FRAME_LEN] = {0};
 
-    /* Doi toi da 30ms (= 6 frame @ 200Hz) */
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+
     if (HAL_UART_Receive(&huart2, f, VB22A_FRAME_LEN, 30) != HAL_OK)
         return 0xFFFF;
 
-    if (f[0] != VB22A_HEADER || f[1] != VB22A_HEADER)
-        return 0xFFFF;
+    /* Validate header */
+    if (f[0] != VB22A_HEADER) return 0xFFFF;
 
-    /* Checksum = sum bytes 0..7, lay byte thap */
-    uint8_t chk = 0;
-    for (int i = 0; i < 8; i++) chk += f[i];
-    if (chk != f[8]) return 0xFFFF;
+    /* Validate checksum: ~(sum bytes[1..2]) */
+    uint8_t chk = (uint8_t)(~(f[1] + f[2]) & 0xFF);
+    if (chk != f[3]) return 0xFFFF;
 
-    uint16_t cm = (uint16_t)f[2] | ((uint16_t)f[3] << 8);
-    if (cm == 0 || cm > VB22A_MAX_CM) return 0xFFFF;
+    /* Lay khoang cach (cm) */
+    uint16_t cm = (uint16_t)f[1] | ((uint16_t)f[2] << 8);
+
+    if (cm < VB22A_MIN_CM || cm >= VB22A_MAX_CM) return 0xFFFF;
 
     return cm * 10;  /* cm -> mm */
 }
 
 /* ----------------------------------------------------------
- * Dong goi va gui
+ * Dong goi packet 10 bytes gui Jetson
  * ---------------------------------------------------------- */
-static void send_packet(uint16_t dist_mm)
-{
+static void send_packet(uint16_t dist_mm) {
     uint8_t  pkt[PKT_LEN];
     uint32_t ts = HAL_GetTick();
 
     pkt[0] = PKT_HEADER;
-    pkt[1] = 0x00;                          /* id */
-    pkt[2] = (uint8_t)( dist_mm       & 0xFF);
-    pkt[3] = (uint8_t)((dist_mm >> 8) & 0xFF);
-    pkt[4] = (uint8_t)( ts            & 0xFF);
-    pkt[5] = (uint8_t)((ts >>  8)     & 0xFF);
-    pkt[6] = (uint8_t)((ts >> 16)     & 0xFF);
-    pkt[7] = (uint8_t)((ts >> 24)     & 0xFF);
+    pkt[1] = 0x00;
+    pkt[2] = (uint8_t)( dist_mm        & 0xFF);
+    pkt[3] = (uint8_t)((dist_mm >>  8) & 0xFF);
+    pkt[4] = (uint8_t)( ts             & 0xFF);
+    pkt[5] = (uint8_t)((ts >>  8)      & 0xFF);
+    pkt[6] = (uint8_t)((ts >> 16)      & 0xFF);
+    pkt[7] = (uint8_t)((ts >> 24)      & 0xFF);
 
     uint8_t chk = 0;
     for (int i = 1; i <= 7; i++) chk ^= pkt[i];
     pkt[8] = chk;
     pkt[9] = PKT_FOOTER;
 
-    /* 10 bytes @ 921600 baud ~ 0.11ms, blocking OK */
-    HAL_UART_Transmit(&huart1, pkt, PKT_LEN, 5);
+    HAL_UART_Transmit(&huart1, pkt, PKT_LEN, 10);
 }
 
 /* ----------------------------------------------------------
- * API goi tu main.c
+ * Init: gui lenh Start Ranging
  * ---------------------------------------------------------- */
-void lidar_test_init(void)
-{
-    HAL_Delay(200);  /* cho VB22A boot xong */
+void lidar_test_init(void) {
+    LED_OFF();
+    HAL_Delay(500);  /* Cho VB22A boot */
+
+    /* Start Ranging command */
+    uint8_t cmd_start[] = {0x5A, 0x0A, 0x02, 0x02, 0xF1};
+    vb22a_send_cmd(cmd_start, 5);
+    HAL_Delay(200);
+
+    /* Bao hieu san sang: nhay 3 lan */
+    for (int i = 0; i < 3; i++) {
+        LED_ON(); HAL_Delay(100);
+        LED_OFF(); HAL_Delay(100);
+    }
 }
 
-void lidar_test_tick(void)
-{
+/* ----------------------------------------------------------
+ * Tick: doc + gui lien tuc
+ * ---------------------------------------------------------- */
+void lidar_test_tick(void) {
     uint16_t dist = vb22a_read();
     send_packet(dist);
-    /* Khong them delay o day:
-     * vb22a_read() tu block 0-30ms doi du 1 frame
-     * Toc do gui ~ 200 packet/s = khop voi VB22A output rate */
+
+    /* LED: sang khi co distance hop le */
+    if (dist != 0xFFFF) LED_ON();
+    else                LED_OFF();
 }
 
-/* ----------------------------------------------------------
- * HUONG DAN THEM VAO main.c CUA KEIL / CUBEMX
- * ----------------------------------------------------------
+/*
+ * THEM VAO main.c:
  *
  *   #include "lidar_test_simple.h"
  *
- *   int main(void) {
- *       HAL_Init();
- *       SystemClock_Config();   // 72MHz
- *       MX_GPIO_Init();
- *       MX_USART1_UART_Init();  // 921600
- *       MX_USART2_UART_Init();  // 115200
+ *   // USER CODE BEGIN 2
+ *   lidar_test_init();
+ *   // USER CODE END 2
  *
- *       lidar_test_init();
- *
- *       while (1) {
- *           lidar_test_tick();
- *       }
+ *   // USER CODE BEGIN WHILE
+ *   while (1) {
+ *       lidar_test_tick();
+ *   // USER CODE END WHILE
  *   }
  */

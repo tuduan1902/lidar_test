@@ -5,7 +5,9 @@
  *   g++ -std=c++17 -O2 -lpthread grid_simple.cpp main_simple.cpp -o lidar_test
  *
  * Chay:
- *   ./lidar_test /dev/ttyACM0        <- USB CDC (khuyen nghi)
+// Chay:
+//   ./lidar_test /dev/ttyACM0 460800   <- USB CDC (khuyen nghi)
+//   ./lidar_test /dev/ttyAMA0 460800   <- UART hardware
  *   ./lidar_test /dev/ttyAMA0        <- UART hardware
  */
 
@@ -82,7 +84,7 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_sig);
 
     const char* dev  = argc > 1 ? argv[1] : "/dev/ttyACM0";
-    int         baud = argc > 2 ? std::atoi(argv[2]) : 921600;
+    int         baud = argc > 2 ? std::atoi(argv[2]) : 460800;
 
     std::printf("LiDAR simple test\n");
     std::printf("Device: %s @ %d\n\n", dev, baud);
