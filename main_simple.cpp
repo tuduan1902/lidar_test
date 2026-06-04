@@ -1,19 +1,11 @@
 /**
  * main_simple.cpp
-<<<<<<< HEAD
- *
- * Build:
- *   g++ -std=c++17 -O2 -lpthread grid_simple.cpp main_simple.cpp -o lidar_test
- *
- * Chay:
-// Chay:
-//   ./lidar_test /dev/ttyACM0 460800   <- USB CDC (khuyen nghi)
-//   ./lidar_test /dev/ttyAMA0 460800   <- UART hardware
- *   ./lidar_test /dev/ttyAMA0        <- UART hardware
-=======
  * Build: g++ -std=c++17 -O2 -lpthread grid_simple.cpp main_simple.cpp -o lidar_test
  * Chay:  ./lidar_test /dev/ttyTHS1 115200
->>>>>>> 1bffcac8179ef6024fa9533994534af3ce6b441e
+ * Check UART data:stty -F /dev/ttyTHS1 115200 raw -echo -echoe -echok
+ hexdump -C /dev/ttyTHS1
+ * 
+ *
  */
 #include "grid_simple.hpp"
 #include <cstdio>
@@ -77,13 +69,8 @@ int main(int argc, char** argv) {
     std::signal(SIGINT,  on_sig);
     std::signal(SIGTERM, on_sig);
 
-<<<<<<< HEAD
-    const char* dev  = argc > 1 ? argv[1] : "/dev/ttyACM0";
-    int         baud = argc > 2 ? std::atoi(argv[2]) : 460800;
-=======
     const char* dev  = argc > 1 ? argv[1] : "/dev/ttyTHS1";
     int         baud = argc > 2 ? std::atoi(argv[2]) : 115200;
->>>>>>> 1bffcac8179ef6024fa9533994534af3ce6b441e
 
     std::printf("=== LiDAR Test ===\n");
     std::printf("Device: %s @ %d baud\n\n", dev, baud);
@@ -122,7 +109,7 @@ int main(int argc, char** argv) {
         last_cnt  = cnt;
         last_time = now;
 
-        draw(snap, cnt, last_dist, hz);
+        //draw(snap, cnt, last_dist, hz);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
