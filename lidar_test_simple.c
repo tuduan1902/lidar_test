@@ -39,12 +39,12 @@ static uint16_t vb22a_read(void) {
     uint8_t chk = (uint8_t)(~(f[1] + f[2]) & 0xFF);
     if (chk != f[3]) return 0xFFFF;
 
-    /* Lay khoang cach (cm) */
-    uint16_t cm = (uint16_t)f[1] | ((uint16_t)f[2] << 8);
+    /* Lay khoang cach (mm) */
+    uint16_t mm = (uint16_t)f[1] | ((uint16_t)f[2] << 8);
 
-    if (cm < VB22A_MIN_CM || cm >= VB22A_MAX_CM) return 0xFFFF;
+    if (mm < VB22A_MIN_MM || mm >= VB22A_MAX_MM) return 0xFFFF;
 
-    return cm * 10;  /* cm -> mm */
+    return mm; /* valid distance in mm */
 }
 
 /* ----------------------------------------------------------

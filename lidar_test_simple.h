@@ -17,8 +17,8 @@
  *
  * FRAME VB22A OUTPUT (4 bytes):
  *   [0]    0x5C  header
- *   [1][2] dist (2 byte, little-endian, don vi cm)
- *          Range: 0~20000cm, out-of-range = 20000
+ *   [1][2] dist (2 byte, little-endian, don vi mm)
+ *          Range: 0~20000mm, out-of-range = 20000
  *   [3]    checksum = ~(sum(bytes[1..2])) & 0xFF
  *
  * LENH GUI VB22A:
@@ -33,8 +33,8 @@
 /* VB22A frame */
 #define VB22A_HEADER     0x5C
 #define VB22A_FRAME_LEN  4
-#define VB22A_MAX_CM     20000
-#define VB22A_MIN_CM     10
+#define VB22A_MAX_MM     20000
+#define VB22A_MIN_MM     10
 
 /* Packet STM32 -> Jetson (10 bytes):
  * [0]      0xAA  header
