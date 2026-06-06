@@ -44,7 +44,11 @@ static uint16_t vb22a_read(void) {
 
     if (mm < VB22A_MIN_MM || mm >= VB22A_MAX_MM) return 0xFFFF;
 
+<<<<<<< HEAD
     return mm; /* valid distance in mm */
+=======
+    return mm;  /* mm */
+>>>>>>> 33ede665fb7a353e098ba891b9c5e3617ee47b5c
 }
 
 /* ----------------------------------------------------------

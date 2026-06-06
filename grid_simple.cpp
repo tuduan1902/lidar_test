@@ -30,6 +30,7 @@ void GridSimple::uart_close(){ if(fd_>=0){::close(fd_);fd_=-1;} }
 bool GridSimple::parse(const uint8_t* b, ScanPoint& o){
     if(b[0]!=PKT_HDR||b[PKT_LEN-1]!=PKT_FTR) return false;
     o.id      = b[1];
+
     o.dist_mm = (uint16_t)b[2] | ((uint16_t)b[3]<<8);
     o.ts_ms   = (uint32_t)b[4]|((uint32_t)b[5]<<8)|
                 ((uint32_t)b[6]<<16)|((uint32_t)b[7]<<24);

@@ -5,15 +5,15 @@
  * DAU DAY:
  *   VB22A VCC  -> Blue Pill 3.3V
  *   VB22A GND  -> GND
- *   VB22A TX   -> PA3 (USART2_RX)  460800 baud
- *   VB22A RX   <- PA2 (USART2_TX)  460800 baud  <- PHAI NOI de gui lenh
+ *   VB22A TX   -> PA3 (USART2_RX)  115200 baud
+ *   VB22A RX   <- PA2 (USART2_TX)  115200 baud  <- PHAI NOI de gui lenh
  *
  *   Blue Pill PA9 (USART1_TX) -> Jetson pin 10 (THS1_RX)  115200 baud
  *   Blue Pill GND             -> Jetson GND
  *
  * KEIL USART CONFIG:
  *   USART1: 115200 baud, 8N1  (-> Jetson)
- *   USART2: 460800 baud, 8N1  (<-> VB22A)
+ *   USART2: 115200 baud, 8N1  (<-> VB22A)
  *
  * FRAME VB22A OUTPUT (4 bytes):
  *   [0]    0x5C  header
