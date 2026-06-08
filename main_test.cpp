@@ -21,7 +21,7 @@ static void on_sig(int) { g_quit.store(true); }
 
 static void draw(const uint8_t* g, uint32_t total, uint16_t last_mm,
                  int last_angle_tenths, float hz) {
-    constexpr int V   = 40;
+    constexpr int V   = 100;
     constexpr int off = (GRID_N - V) / 2;
 
     std::printf("\033[2J\033[H");
