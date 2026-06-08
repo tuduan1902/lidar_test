@@ -27,7 +27,7 @@ static void on_sig(int) { g_quit.store(true); }
 
 static void draw(const uint8_t* g, uint32_t total, uint16_t last_mm,
                  int last_angle_tenths, float hz) {
-    constexpr int Vx  = 80;
+    constexpr int Vx  = 80; 
     constexpr int Vy  = 40;
     constexpr int offx = (GRID_N - Vx) / 2;
     constexpr int offy = (GRID_N - Vy) / 2;
