@@ -41,8 +41,8 @@
 /* ---- VB22A ---- */
 #define VB22A_HEADER     0x5C
 #define VB22A_FRAME_LEN  4
-#define VB22A_MAX_CM     20000
-#define VB22A_MIN_CM     10
+#define VB22A_MAX_MM     20000
+#define VB22A_MIN_MM     10
 
 /* ---- Packet ---- */
 #define PKT_HEADER  0xAA
