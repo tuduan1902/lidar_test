@@ -18,7 +18,7 @@
 /* ---- Extern handles (CubeMX) ---- */
 extern SPI_HandleTypeDef  hspi1;
 extern UART_HandleTypeDef huart1;   /* -> Jetson   115200 */
-extern UART_HandleTypeDef huart2;   /* <- VB22A LEFT  460800 */
+extern UART_HandleTypeDef huart2;   /* <- VB22A LEFT  115200 */
 extern UART_HandleTypeDef huart3;   /* <- VB22A RIGHT 460800 */
 extern TIM_HandleTypeDef  htim2;    /* Motor LEFT  CH1=PA0 CH2=PA1 */
 extern TIM_HandleTypeDef  htim3;    /* Motor RIGHT CH1=PB4 CH2=PB5 (partial remap) */
