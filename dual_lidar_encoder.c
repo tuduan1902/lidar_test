@@ -1,31 +1,31 @@
 /**
- * dual_lidar_encoder.c
- * Mo rong tu lidar_with_encoder.c (1 lidar/encoder/motor)
- * len 2 lidar/encoder/motor bang cach refactor sang array [NUM_LIDAR]
+ * dual_lidar_encoder.c — DMA version
  *
- * Logic hoan toan giong cu, chi nhan doi:
- *   - enc_old_raw, enc_turns, enc_position, scan_home, scan_target, scan_dir
- *     tat ca thanh array [2]
- *   - MT6825_ReadReg/ReadRawAngle nhan them tham so id de chon CS
- *   - motor_forward/reverse nhan them id de chon TIM
- *   - vb22a_read nhan them id de chon UART
- *   - send_packet nhan them id de dien vao pkt[1]
+ * Core idea:
+ *   HAL_UART_Receive_DMA() chay 1 lan khi init, DMA tu dong nap vao
+ *   circular buffer lien tuc. tick() chi can scan buffer tim frame 0x5C,
+ *   khong bao gio block. Ca 2 UART hoat dong hoan toan song song.
  */
-
 #include "dual_lidar_encoder.h"
 #include <string.h>
 
-/* ---- Extern handles (CubeMX) ---- */
+/* ---- Extern handles ---- */
 extern SPI_HandleTypeDef  hspi1;
-extern UART_HandleTypeDef huart1;   /* -> Jetson   115200 */
-extern UART_HandleTypeDef huart2;   /* <- VB22A LEFT  115200 */
-extern UART_HandleTypeDef huart3;   /* <- VB22A RIGHT 460800 */
-extern TIM_HandleTypeDef  htim2;    /* Motor LEFT  CH1=PA0 CH2=PA1 */
-extern TIM_HandleTypeDef  htim3;    /* Motor RIGHT CH1=PB4 CH2=PB5 (partial remap) */
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart3;
+extern DMA_HandleTypeDef  hdma_usart2_rx;  /* CubeMX tu tao */
+extern DMA_HandleTypeDef  hdma_usart3_rx;
+extern TIM_HandleTypeDef  htim2;
+extern TIM_HandleTypeDef  htim3;
 
-/* ---- Lookup: UART va TIM theo id ---- */
-static UART_HandleTypeDef* const uart_lidar[NUM_LIDAR] = { &huart2, &huart3 };
-static TIM_HandleTypeDef*  const tim_motor[NUM_LIDAR]  = { &htim2,  &htim3  };
+/* ---- DMA circular buffers ---- */
+static uint8_t dma_buf[NUM_LIDAR][DMA_BUF_LEN];
+
+/* ---- Lookup ---- */
+static UART_HandleTypeDef* const uart_h[NUM_LIDAR]  = {&huart2, &huart3};
+static DMA_HandleTypeDef*  const dma_h[NUM_LIDAR]   = {&hdma_usart2_rx, &hdma_usart3_rx};
+static TIM_HandleTypeDef*  const tim_h[NUM_LIDAR]   = {&htim2, &htim3};
 
 /* ---- LED ---- */
 #define LED_ON()  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET)
@@ -33,11 +33,9 @@ static TIM_HandleTypeDef*  const tim_motor[NUM_LIDAR]  = { &htim2,  &htim3  };
 #define LED_TOG() HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13)
 
 /* ============================================================
- *  MT6825 — SPI chung, chon CS theo id
+ *  MT6825 — SPI chung, CS theo id
  * ============================================================ */
-
 static void cs_select(uint8_t id) {
-    /* Keo xuong CS cua encoder can doc, keo len cai con lai */
     if (id == LIDAR_LEFT) {
         HAL_GPIO_WritePin(CS_LEFT_PORT,  CS_LEFT_PIN,  GPIO_PIN_RESET);
         HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_SET);
@@ -46,139 +44,162 @@ static void cs_select(uint8_t id) {
         HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_RESET);
     }
 }
-
-static void cs_release_all(void) {
+static void cs_all_high(void) {
     HAL_GPIO_WritePin(CS_LEFT_PORT,  CS_LEFT_PIN,  GPIO_PIN_SET);
     HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_SET);
 }
 
-static uint16_t MT6825_ReadReg(uint8_t id, uint8_t reg) {
+static uint16_t enc_read_reg(uint8_t id, uint8_t reg) {
     uint8_t tx[2] = {0x80 | (reg & 0x7F), 0x00};
     uint8_t rx[2] = {0, 0};
     cs_select(id);
     HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, 10);
-    cs_release_all();
+    cs_all_high();
     return ((uint16_t)rx[0] << 8) | rx[1];
 }
 
-static uint32_t MT6825_ReadRawAngle(uint8_t id) {
-    uint16_t r03 = MT6825_ReadReg(id, 0x03); HAL_Delay(1);
-    uint16_t r04 = MT6825_ReadReg(id, 0x04); HAL_Delay(1);
-    uint16_t r05 = MT6825_ReadReg(id, 0x05);
+static uint32_t enc_read_raw(uint8_t id) {
+    uint16_t r03 = enc_read_reg(id, 0x03); HAL_Delay(1);
+    uint16_t r04 = enc_read_reg(id, 0x04); HAL_Delay(1);
+    uint16_t r05 = enc_read_reg(id, 0x05);
     return ((uint32_t)(r03 & 0xFF) << 10)
          | ((uint32_t)(r04 & 0xFF) <<  2)
          | ((uint32_t)(r05 >>  6) & 0x03);
 }
 
-/* ============================================================
- *  Multi-turn state -- array [NUM_LIDAR]
- *  (logic giong het file cu, chi them [id])
- * ============================================================ */
-static uint32_t enc_old_raw [NUM_LIDAR] = {0, 0};
-static int32_t  enc_turns   [NUM_LIDAR] = {0, 0};
-static int64_t  enc_position[NUM_LIDAR] = {0, 0};
-static uint8_t  enc_first   [NUM_LIDAR] = {1, 1};
+/* ---- Multi-turn ---- */
+static uint32_t enc_old[NUM_LIDAR]  = {0,0};
+static int32_t  enc_turns[NUM_LIDAR]= {0,0};
+static int64_t  enc_pos[NUM_LIDAR]  = {0,0};
+static uint8_t  enc_first[NUM_LIDAR]= {1,1};
 
-static void MT6825_UpdateTurns(uint8_t id, uint32_t cur) {
-    if (enc_first[id]) {
-        enc_old_raw[id] = cur;
-        enc_first[id]   = 0;
-        return;
-    }
-    int32_t diff = (int32_t)cur - (int32_t)enc_old_raw[id];
-    if      (diff < -131072) enc_turns[id]++;
-    else if (diff >  131072) enc_turns[id]--;
-    enc_old_raw[id] = cur;
-}
-
-static int64_t MT6825_GetPosition(uint8_t id, uint32_t cur) {
-    return (int64_t)enc_turns[id] * 262144LL + (int64_t)cur;
+static void enc_update(uint8_t id, uint32_t cur) {
+    if (enc_first[id]) { enc_old[id]=cur; enc_first[id]=0; return; }
+    int32_t d = (int32_t)cur - (int32_t)enc_old[id];
+    if      (d < -131072) enc_turns[id]++;
+    else if (d >  131072) enc_turns[id]--;
+    enc_old[id] = cur;
 }
 
 /* ============================================================
- *  Motor -- chon TIM theo id, logic giong cu
+ *  Motor
  * ============================================================ */
-static void motor_forward(uint8_t id, uint16_t pwm) {
+static void motor_set(uint8_t id, int8_t dir, uint16_t pwm) {
     if (pwm > PWM_MAX) pwm = PWM_MAX;
     if (pwm < PWM_MIN) pwm = PWM_MIN;
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_1, pwm);
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_2, 0);
-}
-
-static void motor_reverse(uint8_t id, uint16_t pwm) {
-    if (pwm > PWM_MAX) pwm = PWM_MAX;
-    if (pwm < PWM_MIN) pwm = PWM_MIN;
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_1, 0);
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_2, pwm);
-}
-
-static void motor_stop(uint8_t id) {
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_1, 0);
-    __HAL_TIM_SET_COMPARE(tim_motor[id], TIM_CHANNEL_2, 0);
-}
-
-/* Logic goto position -- copy y het file cu, them tham so id */
-static void motor_goto_position(uint8_t id, int64_t target) {
-    int64_t error = target - enc_position[id];
-
-    if (error > DEADBAND_RAW) {
-        uint16_t pwm = (uint16_t)(
-            (float)(error > 65536 ? 65536 : error) * KP_MOTOR);
-        motor_forward(id, pwm);
-    } else if (error < -DEADBAND_RAW) {
-        int64_t abs_err = -error;
-        uint16_t pwm = (uint16_t)(
-            (float)(abs_err > 65536 ? 65536 : abs_err) * KP_MOTOR);
-        motor_reverse(id, pwm);
+    if (dir > 0) {
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_1, pwm);
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_2, 0);
+    } else if (dir < 0) {
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_2, pwm);
     } else {
-        motor_stop(id);
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(tim_h[id], TIM_CHANNEL_2, 0);
     }
 }
 
-/* ============================================================
- *  Scan state -- array [NUM_LIDAR]
- * ============================================================ */
-static int64_t scan_home  [NUM_LIDAR] = {0, 0};
-static int64_t scan_target[NUM_LIDAR] = {0, 0};
-static int8_t  scan_dir   [NUM_LIDAR] = {-1, -1};
+static void motor_goto(uint8_t id, int64_t target) {
+    int64_t err = target - enc_pos[id];
+    if (err > DEADBAND_RAW) {
+        uint16_t p = (uint16_t)((float)(err>65536?65536:err)*KP_MOTOR);
+        motor_set(id, +1, p);
+    } else if (err < -DEADBAND_RAW) {
+        uint16_t p = (uint16_t)((float)((-err)>65536?65536:(-err))*KP_MOTOR);
+        motor_set(id, -1, p);
+    } else {
+        motor_set(id, 0, 0);
+    }
+}
+
+/* ---- Scan state ---- */
+static int64_t scan_home  [NUM_LIDAR] = {0,0};
+static int64_t scan_target[NUM_LIDAR] = {0,0};
+static int8_t  scan_dir   [NUM_LIDAR] = {-1,-1};
 
 /* ============================================================
- *  VB22A -- chon UART theo id, logic giong cu
+ *  VB22A — doc tu DMA circular buffer (KHONG block)
+ *
+ *  DMA nap byte lien tuc vao dma_buf[id][0..DMA_BUF_LEN-1]
+ *  NDTR (number of data to receive) dem nguoc tu DMA_BUF_LEN ve 0
+ *  -> write_pos = DMA_BUF_LEN - __HAL_DMA_GET_COUNTER(dma)
+ *
+ *  Tim frame: quet buffer tu last_read_pos[id] tim byte 0x5C,
+ *  doc 4 byte lien tiep, validate checksum.
  * ============================================================ */
-static uint16_t vb22a_read(uint8_t id) {
-    uint8_t f[VB22A_FRAME_LEN] = {0};
-    __HAL_UART_CLEAR_OREFLAG(uart_lidar[id]);
-    if (HAL_UART_Receive(uart_lidar[id], f, VB22A_FRAME_LEN, 30) != HAL_OK)
-        return 0xFFFF;
-    if (f[0] != VB22A_HEADER) return 0xFFFF;
-    uint8_t chk = (uint8_t)(~(f[1] + f[2]) & 0xFF);
-    if (chk != f[3]) return 0xFFFF;
-    uint16_t mm = (uint16_t)f[1] | ((uint16_t)f[2] << 8);
-    if (mm < VB22A_MIN_MM || mm >= VB22A_MAX_MM) return 0xFFFF;
-    return mm;
+static uint8_t dma_read_pos[NUM_LIDAR] = {0, 0}; /* vi tri da doc */
+
+static uint16_t vb22a_read_dma(uint8_t id) {
+    /* Vi tri DMA dang ghi hien tai */
+    uint16_t write_pos = DMA_BUF_LEN
+                       - (uint16_t)__HAL_DMA_GET_COUNTER(dma_h[id]);
+
+    uint8_t* buf  = dma_buf[id];
+    uint8_t  rp   = dma_read_pos[id];
+
+    /* Quet tu rp den write_pos (xu ly wrap-around) */
+    uint8_t bytes_avail;
+    if (write_pos >= rp)
+        bytes_avail = (uint8_t)(write_pos - rp);
+    else
+        bytes_avail = (uint8_t)(DMA_BUF_LEN - rp + write_pos);
+
+    if (bytes_avail < VB22A_FRAME_LEN) return 0xFFFF; /* chua du frame */
+
+    /* Tim header 0x5C trong bytes co san */
+    for (uint8_t i = 0; i < bytes_avail; i++) {
+        uint8_t idx = (rp + i) % DMA_BUF_LEN;
+        if (buf[idx] != VB22A_HEADER) continue;
+
+        /* Kiem tra du 4 bytes */
+        if (bytes_avail - i < VB22A_FRAME_LEN) break;
+
+        /* Doc 4 bytes frame */
+        uint8_t f[VB22A_FRAME_LEN];
+        for (uint8_t j = 0; j < VB22A_FRAME_LEN; j++)
+            f[j] = buf[(idx + j) % DMA_BUF_LEN];
+
+        /* Validate checksum */
+        uint8_t chk = (uint8_t)(~(f[1] + f[2]) & 0xFF);
+        if (chk != f[3]) {
+            /* Checksum sai, bo qua byte nay tim header tiep */
+            continue;
+        }
+
+        /* Valid frame! Cap nhat read pointer */
+        dma_read_pos[id] = (rp + i + VB22A_FRAME_LEN) % DMA_BUF_LEN;
+
+        uint16_t mm = (uint16_t)f[1] | ((uint16_t)f[2] << 8);
+        if (mm < VB22A_MIN_MM || mm >= VB22A_MAX_MM) return 0xFFFF;
+        return mm;
+    }
+
+    /* Khong tim thay frame hop le, cap nhat read pointer tranh ket */
+    dma_read_pos[id] = (uint8_t)write_pos;
+    return 0xFFFF;
 }
 
 /* ============================================================
- *  Dong goi packet -- pkt[1] = id (truoc la luon 0x00)
+ *  Dong goi va gui packet
  * ============================================================ */
 static void send_packet(uint8_t id, uint16_t dist_mm, float angle_deg) {
     uint8_t  pkt[PKT_LEN];
     uint32_t ts    = HAL_GetTick();
     int16_t  ang10 = (int16_t)(angle_deg * 10.0f);
-    uint32_t pos_lo = (uint32_t)(enc_position[id] & 0xFFFFFFFF);
+    uint16_t pos16 = (uint16_t)(enc_pos[id] & 0xFFFF);
 
     pkt[0]  = PKT_HEADER;
-    pkt[1]  = id;                               /* 0=LEFT 1=RIGHT */
-    pkt[2]  = (uint8_t)( dist_mm       & 0xFF);
+    pkt[1]  = id;
+    pkt[2]  = (uint8_t)( dist_mm & 0xFF);
     pkt[3]  = (uint8_t)((dist_mm >> 8) & 0xFF);
-    pkt[4]  = (uint8_t)( ang10         & 0xFF);
-    pkt[5]  = (uint8_t)((ang10  >> 8)  & 0xFF);
-    pkt[6]  = (uint8_t)( ts            & 0xFF);
-    pkt[7]  = (uint8_t)((ts >>  8)     & 0xFF);
-    pkt[8]  = (uint8_t)((ts >> 16)     & 0xFF);
-    pkt[9]  = (uint8_t)((ts >> 24)     & 0xFF);
-    pkt[10] = (uint8_t)( pos_lo        & 0xFF);
-    pkt[11] = (uint8_t)((pos_lo >> 8)  & 0xFF);
+    pkt[4]  = (uint8_t)( ang10 & 0xFF);
+    pkt[5]  = (uint8_t)((ang10 >> 8) & 0xFF);
+    pkt[6]  = (uint8_t)( ts & 0xFF);
+    pkt[7]  = (uint8_t)((ts >>  8) & 0xFF);
+    pkt[8]  = (uint8_t)((ts >> 16) & 0xFF);
+    pkt[9]  = (uint8_t)((ts >> 24) & 0xFF);
+    pkt[10] = (uint8_t)( pos16 & 0xFF);
+    pkt[11] = (uint8_t)((pos16 >> 8) & 0xFF);
 
     uint8_t chk = 0;
     for (int i = 1; i <= 11; i++) chk ^= pkt[i];
@@ -193,32 +214,50 @@ static void send_packet(uint8_t id, uint16_t dist_mm, float angle_deg) {
  * ============================================================ */
 void dual_lidar_init(void) {
     LED_OFF();
-    cs_release_all();
+    cs_all_high();
     HAL_Delay(300);
 
-    /* Gui lenh Start Ranging cho ca 2 VB22A */
-    uint8_t cmd_start[] = {0x5A, 0x0A, 0x02, 0x02, 0xF1};
-    HAL_UART_Transmit(&huart2, cmd_start, 5, 100);  /* LEFT  */
-    HAL_UART_Transmit(&huart3, cmd_start, 5, 100);  /* RIGHT */
+    /* Gui Start Ranging cho ca 2 VB22A */
+    uint8_t cmd[] = {0x5A, 0x0A, 0x02, 0x02, 0xF1};
+    HAL_UART_Transmit(&huart2, cmd, 5, 100);
+    HAL_UART_Transmit(&huart3, cmd, 5, 100);
     HAL_Delay(200);
 
-    /* Khoi dong ca 2 motor PWM */
+    /* Bat DMA circular cho ca 2 UART truoc tien */
+    memset(dma_buf, 0, sizeof(dma_buf));
+    HAL_UART_Receive_DMA(&huart2, dma_buf[LIDAR_LEFT],  DMA_BUF_LEN);
+    HAL_UART_Receive_DMA(&huart3, dma_buf[LIDAR_RIGHT], DMA_BUF_LEN);
+
+
+    /* USER CODE: DEBUG - doc thu DMA buffer cua id=1 sau 500ms */
+    HAL_Delay(500);
+    uint32_t ndtr1 = __HAL_DMA_GET_COUNTER(&hdma_usart3_rx);
+    uint8_t dbg[3] = {0xCC, (uint8_t)(ndtr1 >> 8), (uint8_t)(ndtr1 & 0xFF)};
+    HAL_UART_Transmit(&huart1, dbg, 3, 10);
+    uint8_t debug_pkt[14];
+    uint8_t dbg_hdr = 0xBB;
+    /* Gui 1 byte bao hieu bat dau debug */
+    HAL_UART_Transmit(&huart1, &dbg_hdr, 1, 10);
+    /* Gui toan bo DMA buffer id=1 len Jetson */
+    HAL_UART_Transmit(&huart1, dma_buf[1], DMA_BUF_LEN, 50);
+
+    /* Start PWM */
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
 
-    /* Doc HOME cho ca 2 encoder */
+    /* HOME encoder */
     for (uint8_t i = 0; i < NUM_LIDAR; i++) {
-        uint32_t raw = MT6825_ReadRawAngle(i);
-        MT6825_UpdateTurns(i, raw);
-        enc_position[i] = MT6825_GetPosition(i, raw);
-        scan_home[i]    = enc_position[i];
-        scan_target[i]  = scan_home[i] - SCAN_RAW_HALF; /* bat dau ve -90 */
+        uint32_t raw = enc_read_raw(i);
+        enc_update(i, raw);
+        enc_pos[i]      = (int64_t)enc_turns[i] * MT6825_RES + raw;
+        scan_home[i]    = enc_pos[i];
+        scan_target[i]  = scan_home[i] - SCAN_RAW_HALF;
         scan_dir[i]     = -1;
     }
 
-    /* LED nhay 3 lan bao hieu san sang */
+    /* LED nhay 3 lan */
     for (int i = 0; i < 3; i++) {
         LED_ON();  HAL_Delay(100);
         LED_OFF(); HAL_Delay(100);
@@ -226,54 +265,49 @@ void dual_lidar_init(void) {
 }
 
 /* ============================================================
- *  TICK -- goi trong while(1)
- *  Xu ly tuan tu LEFT (id=0) roi RIGHT (id=1)
- *  Logic moi id giong het file cu, chi them [id]
+ *  TICK — khong block, ca 2 lidar doc song song tu DMA buffer
  * ============================================================ */
 void dual_lidar_tick(void) {
-
     for (uint8_t id = 0; id < NUM_LIDAR; id++) {
 
-        /* 1. Doc encoder, cap nhat position */
-        uint32_t raw = MT6825_ReadRawAngle(id);
-        MT6825_UpdateTurns(id, raw);
-        enc_position[id] = MT6825_GetPosition(id, raw);
+        /* 1. Doc encoder */
+        uint32_t raw = enc_read_raw(id);
+        enc_update(id, raw);
+        enc_pos[id] = (int64_t)enc_turns[id] * MT6825_RES + raw;
 
-        /* 2. Tinh goc tuong doi so voi HOME */
-        int64_t rel_raw    = enc_position[id] - scan_home[id];
-        float   angle_deg  = (float)rel_raw * 360.0f / (float)MT6825_RES;
-        while (angle_deg >  180.0f) angle_deg -= 360.0f;
-        while (angle_deg < -180.0f) angle_deg += 360.0f;
+        /* 2. Tinh goc tuong doi */
+        int64_t rel = enc_pos[id] - scan_home[id];
+        float   deg = (float)rel * 360.0f / (float)MT6825_RES;
+        while (deg >  180.0f) deg -= 360.0f;
+        while (deg < -180.0f) deg += 360.0f;
 
-        /* 3. Dieu khien motor toi scan_target */
-        motor_goto_position(id, scan_target[id]);
+        /* 3. Dieu khien motor */
+        motor_goto(id, scan_target[id]);
 
-        /* 4. Kiem tra da toi target -> doi chieu (logic y het file cu) */
-        int64_t error = scan_target[id] - enc_position[id];
-        if (scan_dir[id] > 0 && error < DEADBAND_RAW) {
-            scan_dir[id]    = -1;
+        /* 4. Doi chieu quet */
+        int64_t err = scan_target[id] - enc_pos[id];
+        if (scan_dir[id] > 0 && err < DEADBAND_RAW) {
+            scan_dir[id] = -1;
             scan_target[id] = scan_home[id] - SCAN_RAW_HALF;
-        } else if (scan_dir[id] < 0 && error > -DEADBAND_RAW) {
-            scan_dir[id]    = +1;
+        } else if (scan_dir[id] < 0 && err > -DEADBAND_RAW) {
+            scan_dir[id] = +1;
             scan_target[id] = scan_home[id] + SCAN_RAW_HALF;
         }
 
-        /* 5. Doc khoang cach VB22A */
-        uint16_t dist = vb22a_read(id);
+        /* 5. Doc LiDAR tu DMA buffer (non-blocking) */
+        uint16_t dist = vb22a_read_dma(id);
 
-        /* 6. Gui packet voi id tuong ung */
-        send_packet(id, dist, angle_deg);
+        /* 6. Gui packet */
+        send_packet(id, dist, deg);
 
-        /* 7. LED toggle khi nhan duoc du lieu hop le */
         if (dist != 0xFFFF) LED_TOG();
     }
 }
 
 /*
  * ============================================================
- * THEM VAO main.c (THAY THE lidar_encoder_init/tick cu):
+ * THEM VAO main.c:
  * ============================================================
- *
  *   #include "dual_lidar_encoder.h"
  *
  *   // USER CODE BEGIN 2
@@ -281,39 +315,27 @@ void dual_lidar_tick(void) {
  *   // USER CODE END 2
  *
  *   // USER CODE BEGIN WHILE
- *   while (1) {
- *       dual_lidar_tick();
+ *   while (1) { dual_lidar_tick(); }
  *   // USER CODE END WHILE
- *   }
  *
  * ============================================================
- * CUBEMX THEM MOI so voi file cu:
+ * CUBEMX — THEM MOI so voi blocking version:
  * ============================================================
- *   1. USART3: 460800 8N1
- *      PB10=TX  PB11=RX
+ *   USART2: them DMA Request RX
+ *     -> DMA Settings: DMA1 Channel6, Direction=P->M,
+ *        Mode=Circular, DataWidth=Byte/Byte
  *
- *   2. GPIO PB0: Output Push-Pull, Speed=Low
- *      (CS encoder RIGHT)
+ *   USART3: them DMA Request RX
+ *     -> DMA Settings: DMA1 Channel3, Direction=P->M,
+ *        Mode=Circular, DataWidth=Byte/Byte
  *
- *   3. TIM3 Partial Remap:
- *      - Mode: PWM Generation CH1 + CH2
- *      - Prescaler=71  Period(ARR)=999
- *      - Partial remap: enable trong CubeMX
- *        -> CH1 doi tu PA6 sang PB4
- *        -> CH2 doi tu PA7 sang PB5
- *      Ly do remap: PA6/PA7 trung voi SPI1 MISO/MOSI
+ *   Sau khi them DMA, CubeMX tu tao:
+ *     DMA_HandleTypeDef hdma_usart2_rx;
+ *     DMA_HandleTypeDef hdma_usart3_rx;
+ *   va cac ham HAL_UART_RxCpltCallback neu can
  *
- *   Trong code HAL CubeMX se tu them:
- *      __HAL_AFIO_REMAP_TIM3_PARTIAL();
- *   vao ham HAL_TIM_MspPostInit() trong stm32f1xx_hal_msp.c
- *
+ *   QUAN TRONG: Trong NVIC, enable:
+ *     DMA1 Channel6 global interrupt (cho USART2 RX DMA)
+ *     DMA1 Channel3 global interrupt (cho USART3 RX DMA)
  * ============================================================
- * KHONG THAY DOI:
- * ============================================================
- *   SPI1  PA5/PA6/PA7 (SCK/MISO/MOSI)
- *   PA4   CS encoder LEFT
- *   USART1 PA9/PA10   -> Jetson
- *   USART2 PA2/PA3    <- VB22A LEFT
- *   TIM2  PA0/PA1     motor LEFT
- *   PC13  LED
  */

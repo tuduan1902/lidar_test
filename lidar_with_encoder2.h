@@ -40,7 +40,7 @@
 #define MT6825_CS_PORT0  GPIOA
 #define MT6825_CS_PIN0   GPIO_PIN_4
 #define MT6825_CS_PORT1  GPIOB
-#define MT6825_CS_PIN1   GPIO_PIN_12
+#define MT6825_CS_PIN1   GPIO_PIN_0
 #define MT6825_RES       262144UL   /* 2^18 */
 
 #define VB22A_COUNT      2
