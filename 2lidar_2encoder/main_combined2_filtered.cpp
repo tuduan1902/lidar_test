@@ -391,7 +391,7 @@ static void draw(const uint8_t* grid, const uint8_t* src,
                  const std::array<uint16_t,2>& last_dist,
                  const std::array<int32_t,2>& last_angle_tenths,
                  const std::array<float,4>& last_us) {
-    constexpr int V = 50;
+    constexpr int V = 100;
     constexpr int OFF = (GRID_N - V) / 2;
 
     std::printf("\033[2J\033[H");
