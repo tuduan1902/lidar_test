@@ -269,6 +269,16 @@ void dual_lidar_init(void) {
  * ============================================================ */
 void dual_lidar_tick(void) {
     for (uint8_t id = 0; id < NUM_LIDAR; id++) {
+        
+        /* ---- CHỐNG ĐÓNG BĂNG UART DMA DO LỖI OVERRUN (ORE) ---- */
+        UART_HandleTypeDef *huart = uart_h[id];
+        if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) || (huart->RxState == HAL_UART_STATE_READY)) {
+            // Nếu phát hiện cờ lỗi Overrun hoặc bộ nhận DMA bị dừng (STATE_READY)
+            __HAL_UART_CLEAR_OREFLAG(huart);
+            // Ép bộ nhận DMA Circular Buffer hoạt động trở lại từ mảng dma_buf tương ứng
+            HAL_UART_Receive_DMA(huart, dma_buf[id], DMA_BUF_LEN);
+        }
+        /* ------------------------------------------------------- */
 
         /* 1. Doc encoder */
         uint32_t raw = enc_read_raw(id);
