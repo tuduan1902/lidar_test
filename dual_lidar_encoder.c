@@ -229,17 +229,17 @@ void dual_lidar_init(void) {
     HAL_UART_Receive_DMA(&huart3, dma_buf[LIDAR_RIGHT], DMA_BUF_LEN);
 
 
-    /* USER CODE: DEBUG - doc thu DMA buffer cua id=1 sau 500ms */
-    HAL_Delay(500);
-    uint32_t ndtr1 = __HAL_DMA_GET_COUNTER(&hdma_usart3_rx);
-    uint8_t dbg[3] = {0xCC, (uint8_t)(ndtr1 >> 8), (uint8_t)(ndtr1 & 0xFF)};
-    HAL_UART_Transmit(&huart1, dbg, 3, 10);
-    uint8_t debug_pkt[14];
-    uint8_t dbg_hdr = 0xBB;
-    /* Gui 1 byte bao hieu bat dau debug */
-    HAL_UART_Transmit(&huart1, &dbg_hdr, 1, 10);
-    /* Gui toan bo DMA buffer id=1 len Jetson */
-    HAL_UART_Transmit(&huart1, dma_buf[1], DMA_BUF_LEN, 50);
+    // /* USER CODE: DEBUG - doc thu DMA buffer cua id=1 sau 500ms */
+    // HAL_Delay(500);
+    // uint32_t ndtr1 = __HAL_DMA_GET_COUNTER(&hdma_usart3_rx);
+    // uint8_t dbg[3] = {0xCC, (uint8_t)(ndtr1 >> 8), (uint8_t)(ndtr1 & 0xFF)};
+    // HAL_UART_Transmit(&huart1, dbg, 3, 10);
+    // uint8_t debug_pkt[14];
+    // uint8_t dbg_hdr = 0xBB;
+    // /* Gui 1 byte bao hieu bat dau debug */
+    // HAL_UART_Transmit(&huart1, &dbg_hdr, 1, 10);
+    // /* Gui toan bo DMA buffer id=1 len Jetson */
+    // HAL_UART_Transmit(&huart1, dma_buf[1], DMA_BUF_LEN, 50);
 
     /* Start PWM */
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
@@ -269,6 +269,16 @@ void dual_lidar_init(void) {
  * ============================================================ */
 void dual_lidar_tick(void) {
     for (uint8_t id = 0; id < NUM_LIDAR; id++) {
+
+        /* ---- CHỐNG ĐÓNG BĂNG UART DMA DO LỖI OVERRUN (ORE) ---- */
+        UART_HandleTypeDef *huart = uart_h[id];
+        if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) || (huart->RxState == HAL_UART_STATE_READY)) {
+            // Nếu phát hiện cờ lỗi Overrun hoặc bộ nhận DMA bị dừng (STATE_READY)
+            __HAL_UART_CLEAR_OREFLAG(huart);
+            // Ép bộ nhận DMA Circular Buffer hoạt động trở lại từ mảng dma_buf tương ứng
+            HAL_UART_Receive_DMA(huart, dma_buf[id], DMA_BUF_LEN);
+        }
+        /* ------------------------------------------------------- */
 
         /* 1. Doc encoder */
         uint32_t raw = enc_read_raw(id);

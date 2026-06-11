@@ -1,30 +1,28 @@
 /**
  * lidar_with_encoder.c
  * Tich hop MT6825 encoder + VB22A LiDAR + motor quet
+ * Da chuyen doi sang USART3 va TIM3 (Partial Remap)
  */
-
 #include "lidar_with_encoder.h"
 #include <string.h>
-/* ---- Extern handles ---- */
 
+/* ---- Extern handles ---- */
 extern SPI_HandleTypeDef  hspi1;
-extern UART_HandleTypeDef huart1;  /* -> Jetson  115200 */
-extern UART_HandleTypeDef huart2;  /* <->VB22A   460800 */
-extern TIM_HandleTypeDef  htim2;   /* PWM motor  CH1=PA0 CH2=PA1 */
+extern UART_HandleTypeDef huart1;  /* -> Jetson   115200 (PA9/PA10) */
+extern UART_HandleTypeDef huart3;  /* <-> VB22A   460800 (PB10/PB11) - THAY DOI */
+extern TIM_HandleTypeDef  htim3;   /* PWM motor   CH1=PB4 CH2=PB5    - THAY DOI */
 
 /* ---- LED ---- */
-
 #define LED_ON()  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET)
 #define LED_OFF() HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET)
 
 /* ============================================================
- *  MT6825 — copy nguyen tu file encoder cua ban
+ * MT6825 — Giữ nguyên logic đọc qua SPI1
  * ============================================================ */
-
 static uint16_t MT6825_ReadReg(uint8_t reg) {
     uint8_t tx[2] = {0x80 | (reg & 0x7F), 0x00};
     uint8_t rx[2] = {0, 0};
-    HAL_GPIO_WritePin(MT6825_CS_PORT, MT6825_CS_PIN, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(MT6825_CS_PORT, MT6825_CS_PIN, GPIO_PIN_RESET); /* Cấu hình trong file .h là PB0 */
     HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, 10);
     HAL_GPIO_WritePin(MT6825_CS_PORT, MT6825_CS_PIN, GPIO_PIN_SET);
     return ((uint16_t)rx[0] << 8) | rx[1];
@@ -37,7 +35,6 @@ static uint32_t MT6825_ReadRawAngle(void) {
     return ((uint32_t)(r03 & 0xFF) << 10)
          | ((uint32_t)(r04 & 0xFF) <<  2)
          | ((uint32_t)(r05 >>  6) & 0x03);
-
 }
 
 /* ---- Multi-turn state ---- */
@@ -57,42 +54,34 @@ static void MT6825_UpdateTurns(uint32_t cur) {
 static int64_t MT6825_GetPosition(uint32_t cur) {
     return (int64_t)enc_turns * 262144LL + (int64_t)cur;
 }
-/* Lay goc hien tai (degree) tu position tuyet doi */
 
 static float position_to_deg(int64_t pos) {
-    /* Lay phan du trong 1 vong */
     int32_t in_rev = (int32_t)(pos % (int64_t)MT6825_RES);
     if (in_rev < 0) in_rev += (int32_t)MT6825_RES;
     float deg = (in_rev * 360.0f) / (float)MT6825_RES;
-    /* Chuyen sang -180..+180 */
     if (deg > 180.0f) deg -= 360.0f;
     return deg;
 }
 
 /* ============================================================
- *  Motor control dung position tuyet doi
- *  -> Tranh vong lap vo tan
+ * Motor control chuyển sang dùng bộ điều khiển TIM3 (PB4/PB5)
  * ============================================================ */
 static void motor_forward(uint16_t pwm) {
     if (pwm > PWM_MAX) pwm = PWM_MAX;
     if (pwm < PWM_MIN) pwm = PWM_MIN;
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pwm);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, pwm); /* Sửa sang htim3 */
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0);
 }
-
 static void motor_reverse(uint16_t pwm) {
     if (pwm > PWM_MAX) pwm = PWM_MAX;
     if (pwm < PWM_MIN) pwm = PWM_MIN;
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, pwm);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);   /* Sửa sang htim3 */
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, pwm);
 }
-
 static void motor_stop(void) {
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 0);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, 0);
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0);   /* Sửa sang htim3 */
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0);
 }
-
-/* Di chuyen toi target_position (raw units tuyet doi) */
 
 static void motor_goto_position(int64_t target) {
     int64_t error = target - enc_position;
@@ -107,27 +96,21 @@ static void motor_goto_position(int64_t target) {
     } else {
         motor_stop();
     }
-
 }
 
-/* ============================================================
- *  Trang thai quet: dung position tuyet doi
- *  Bat dau tu vi tri hien tai lam goc (home)
- *  Quet: home - SCAN_RAW_HALF  <->  home + SCAN_RAW_HALF
- * ============================================================ */
-
-static int64_t scan_home      = 0;   /* vi tri luc khoi dong */
+/* ---- Trang thai quet ---- */
+static int64_t scan_home      = 0;
 static int64_t scan_target    = 0;
 static int8_t  scan_dir       = +1;
 static uint8_t scan_homed     = 0;
 
 /* ============================================================
- *  VB22A doc khoang cach
+ * VB22A đọc khoảng cách chuyển sang nhận dữ liệu từ USART3
  * ============================================================ */
 static uint16_t vb22a_read(void) {
     uint8_t f[VB22A_FRAME_LEN] = {0};
-    __HAL_UART_CLEAR_OREFLAG(&huart2);
-    if (HAL_UART_Receive(&huart2, f, VB22A_FRAME_LEN, 30) != HAL_OK)
+    __HAL_UART_CLEAR_OREFLAG(&huart3); /* Sửa sang huart3 */
+    if (HAL_UART_Receive(&huart3, f, VB22A_FRAME_LEN, 30) != HAL_OK) /* Sửa sang huart3 */
         return 0xFFFF;
     if (f[0] != VB22A_HEADER) return 0xFFFF;
     uint8_t chk = (uint8_t)(~(f[1] + f[2]) & 0xFF);
@@ -138,13 +121,12 @@ static uint16_t vb22a_read(void) {
 }
 
 /* ============================================================
- *  Dong goi packet 14 bytes
+ * Dong goi packet 14 bytes gửi lên Jetson qua USART1
  * ============================================================ */
 static void send_packet(uint16_t dist_mm, float angle_deg) {
     uint8_t  pkt[PKT_LEN];
     uint32_t ts    = HAL_GetTick();
     int16_t  ang10 = (int16_t)(angle_deg * 10.0f);
-    /* Gui 4 byte thap cua position de debug */
     uint32_t pos_lo = (uint32_t)(enc_position & 0xFFFFFFFF);
 
     pkt[0]  = PKT_HEADER;
@@ -165,19 +147,19 @@ static void send_packet(uint16_t dist_mm, float angle_deg) {
     pkt[12] = chk;
     pkt[13] = PKT_FOOTER;
 
-    HAL_UART_Transmit(&huart1, pkt, PKT_LEN, 10);
+    HAL_UART_Transmit(&huart1, pkt, PKT_LEN, 10); /* Vẫn giữ huart1 bắn lên Jetson */
 }
 
 /* ============================================================
- *  INIT
+ * INIT
  * ============================================================ */
 void lidar_encoder_init(void) {
     LED_OFF();
     HAL_Delay(300);
 
-    /* Khoi dong VB22A */
+    /* Khoi dong VB22A qua USART3 */
     uint8_t cmd_start[] = {0x5A, 0x0A, 0x02, 0x02, 0xF1};
-    HAL_UART_Transmit(&huart2, cmd_start, 5, 100);
+    HAL_UART_Transmit(&huart3, cmd_start, 5, 100); /* Sửa sang huart3 */
     HAL_Delay(200);
 
     /* Doc vi tri hien tai lam HOME */
@@ -199,7 +181,7 @@ void lidar_encoder_init(void) {
 }
 
 /* ============================================================
- *  TICK — goi trong while(1)
+ * TICK — goi trong while(1)
  * ============================================================ */
 void lidar_encoder_tick(void) {
     /* 1. Doc encoder, cap nhat position */
@@ -212,7 +194,6 @@ void lidar_encoder_tick(void) {
 
     /* 3. Chuyen sang degree (-180..+180) */
     float angle_deg = (float)rel_raw * 360.0f / (float)MT6825_RES;
-    /* Giu trong khoang -180..+180 */
     while (angle_deg >  180.0f) angle_deg -= 360.0f;
     while (angle_deg < -180.0f) angle_deg += 360.0f;
 
@@ -222,52 +203,46 @@ void lidar_encoder_tick(void) {
     /* 5. Kiem tra da toi target chua -> doi chieu */
     int64_t error = scan_target - enc_position;
     if (scan_dir > 0 && error < DEADBAND_RAW) {
-        /* Da toi +90, quay ve -90 */
         scan_dir    = -1;
         scan_target = scan_home - SCAN_RAW_HALF;
     } else if (scan_dir < 0 && error > -DEADBAND_RAW) {
-        /* Da toi -90, quay ve +90 */
         scan_dir    = +1;
         scan_target = scan_home + SCAN_RAW_HALF;
     }
 
-    /* 6. Doc khoang cach VB22A */
+    /* 6. Doc khoang cach VB22A tu USART3 */
     uint16_t dist = vb22a_read();
 
-    /* 7. Gui packet */
+    /* 7. Gui packet lên Jetson */
     send_packet(dist, angle_deg);
 
-    /* 8. LED */
+    /* 8. LED hiển thị trạng thái nhận tia */
     if (dist != 0xFFFF) LED_ON();
     else                LED_OFF();
 }
 
 /*
-
- * THEM VAO main.c:
+ * HUONG DAN THEM VAO main.c CHINH XAC:
  *
- *   #include "lidar_with_encoder.h"
+ * #include "lidar_with_encoder.h"
  *
- *   // USER CODE BEGIN 2
- *   HAL_TIM_PWM_Start(&tim2, TIM_CHANNEL_1);
- *   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
- *   lidar_encoder_init();
- *   // USER CODE END 2
+ * // USER CODE BEGIN 2
+ * HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // Chuyển sang kích hoạt TIM3
+ * HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2); // Chuyển sang kích hoạt TIM3
+ * lidar_encoder_init();
+ * // USER CODE END 2
  *
- *   // USER CODE BEGIN WHILE
- *   while (1) {
- *       lidar_encoder_tick();
- *   // USER CODE END WHILE
-
- *   }
+ * // USER CODE BEGIN WHILE
+ * while (1) {
+ * lidar_encoder_tick();
+ * // USER CODE END WHILE
+ * }
  *
- * CubeMX / Keil config:
- *   SPI1:  Mode3 (CPOL=High CPHA=2Edge) Master 8bit MSB PSC=32
- *          PA5=SCK PA6=MISO PA7=MOSI PA4=GPIO_Output(CS)
- *   USART1: 115200 8N1  PA9=TX PA10=RX  -> Jetson
- *   USART2: 460800 8N1  PA2=TX PA3=RX   <-> VB22A
- *   TIM2:  PWM CH1+CH2  PSC=71 ARR=999
- *          PA0=CH1(Forward) PA1=CH2(Reverse)
- *   PC13:  GPIO Output (LED)
-
+ * Tóm tắt sơ đồ chân thực tế sau cấu hình:
+ * SPI1:   PA5=SCK, PA6=MISO, PA7=MOSI
+ * PB0:    GPIO_Output (Chân CS_ENC_RIGHT mới của bạn)
+ * USART1: PA9=TX, PA10=RX -> Giao tiếp Jetson (115200 8N1)
+ * USART3: PB10=TX, PB11=RX <-> Giao tiếp LiDAR VB22A (460800 8N1)
+ * TIM3:   PB4=CH1 (Kéo thuận), PB5=CH2 (Kéo nghịch) - [Partial Remap]
+ * PC13:   LED báo tín hiệu
  */
