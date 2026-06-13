@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+
 static std::atomic<bool> g_quit{false};
 static void on_sig(int) { g_quit.store(true); }
 
@@ -483,7 +484,7 @@ int main(int argc, char** argv) {
         std::array<float,4> last_us_vals = { mgr.last_us_cm(0), mgr.last_us_cm(1), mgr.last_us_cm(2), mgr.last_us_cm(3) };
 
         draw(snap, src, lp, up, hz, last_dist, last_angle_tenths, last_us_vals);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     std::printf("\033[2J\033[HStopped...\n");
