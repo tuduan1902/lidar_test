@@ -11,7 +11,6 @@
 
 /* ---- Extern handles ---- */
 extern SPI_HandleTypeDef  hspi1;
-extern SPI_HandleTypeDef  hspi2;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
@@ -24,7 +23,6 @@ extern TIM_HandleTypeDef  htim3;
 static uint8_t dma_buf[NUM_LIDAR][DMA_BUF_LEN];
 
 /* ---- Lookup ---- */
-static SPI_HandleTypeDef*  const spi_h[NUM_LIDAR]   = {&hspi1, &hspi2};
 static UART_HandleTypeDef* const uart_h[NUM_LIDAR]  = {&huart2, &huart3};
 static DMA_HandleTypeDef*  const dma_h[NUM_LIDAR]   = {&hdma_usart2_rx, &hdma_usart3_rx};
 static TIM_HandleTypeDef*  const tim_h[NUM_LIDAR]   = {&htim2, &htim3};
@@ -40,7 +38,9 @@ static TIM_HandleTypeDef*  const tim_h[NUM_LIDAR]   = {&htim2, &htim3};
 static void cs_select(uint8_t id) {
     if (id == LIDAR_LEFT) {
         HAL_GPIO_WritePin(CS_LEFT_PORT,  CS_LEFT_PIN,  GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_SET);
     } else {
+        HAL_GPIO_WritePin(CS_LEFT_PORT,  CS_LEFT_PIN,  GPIO_PIN_SET);
         HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_RESET);
     }
 }
@@ -49,22 +49,42 @@ static void cs_all_high(void) {
     HAL_GPIO_WritePin(CS_RIGHT_PORT, CS_RIGHT_PIN, GPIO_PIN_SET);
 }
 
-static uint16_t enc_read_reg(uint8_t id, uint8_t reg) {
+/* Doc 1 register SPI, KHONG quan ly CS (goi khi CS da o muc thap) */
+static uint16_t spi_read_reg(uint8_t reg) {
     uint8_t tx[2] = {0x80 | (reg & 0x7F), 0x00};
     uint8_t rx[2] = {0, 0};
-    cs_select(id);
-    HAL_SPI_TransmitReceive(spi_h[id], tx, rx, 2, 10);
-    cs_all_high();
+    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, 10);
     return ((uint16_t)rx[0] << 8) | rx[1];
 }
 
 static uint32_t enc_read_raw(uint8_t id) {
-    uint16_t r03 = enc_read_reg(id, 0x03); HAL_Delay(1);
-    uint16_t r04 = enc_read_reg(id, 0x04); HAL_Delay(1);
-    uint16_t r05 = enc_read_reg(id, 0x05);
-    return ((uint32_t)(r03 & 0xFF) << 10)
-         | ((uint32_t)(r04 & 0xFF) <<  2)
-         | ((uint32_t)(r05 >>  6) & 0x03);
+    // tx[0] = 0x83 (Lệnh đọc từ thanh ghi 0x03). 3 byte sau là dummy (0x00) để kích xung clock đọc r03, r04, r05
+    uint8_t tx[4] = {0x83, 0x00, 0x00, 0x00};
+    uint8_t rx[4] = {0, 0, 0, 0};
+
+    // 1. Kích hoạt chọn chip
+    cs_select(id);
+
+    // 2. Truyền nhận liền mạch 4 byte (32 xung clock) - cực kỳ nhanh, không block
+    HAL_SPI_TransmitReceive(&hspi1, tx, rx, 4, 10);
+
+    // 3. Giải phóng chân CS ngay lập tức
+    cs_all_high();
+
+    /* Giải mã dữ liệu theo cơ chế Burst Read của MT6825:
+     * rx[0]: Byte trạng thái hệ thống (Dummy)
+     * rx[1]: Dữ liệu đọc từ thanh ghi 0x03 (Angle[17:10])
+     * rx[2]: Dữ liệu đọc từ thanh ghi 0x04 (Angle[9:2])
+     * rx[3]: Dữ liệu đọc từ thanh ghi 0x05 (Angle[1:0] nằm ở các bit [7:6])
+     */
+    uint32_t r03 = rx[1];
+    uint32_t r04 = rx[2];
+    uint32_t r05 = rx[3];
+
+    // Gộp các bit lại thành góc 18-bit chuẩn xác
+    return (r03 << 10) 
+         | (r04 << 2) 
+         | ((r05 >> 6) & 0x03);
 }
 
 /* ---- Multi-turn ---- */
@@ -269,19 +289,28 @@ void dual_lidar_init(void) {
  * ============================================================ */
 void dual_lidar_tick(void) {
     for (uint8_t id = 0; id < NUM_LIDAR; id++) {
-
-        /* ---- CHỐNG ĐÓNG BĂNG UART DMA DO LỖI OVERRUN (ORE) ---- */
+        
+        /* Chong dong bang DMA do loi Overrun (ORE) */
         UART_HandleTypeDef *huart = uart_h[id];
-        if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) || (huart->RxState == HAL_UART_STATE_READY)) {
-            // Nếu phát hiện cờ lỗi Overrun hoặc bộ nhận DMA bị dừng (STATE_READY)
+        if (__HAL_UART_GET_FLAG(huart, UART_FLAG_ORE) ||
+            (huart->RxState == HAL_UART_STATE_READY)) {
             __HAL_UART_CLEAR_OREFLAG(huart);
-            // Ép bộ nhận DMA Circular Buffer hoạt động trở lại từ mảng dma_buf tương ứng
             HAL_UART_Receive_DMA(huart, dma_buf[id], DMA_BUF_LEN);
         }
-        /* ------------------------------------------------------- */
 
         /* 1. Doc encoder */
         uint32_t raw = enc_read_raw(id);
+
+        //Debug: gui raw len Jetson de kiem tra encoder co bi loi khong
+        uint8_t dbg[6] = {
+            0xDE, id,
+            (uint8_t)(raw  &0xFF),
+            (uint8_t)((raw >> 8) & 0xFF),
+            (uint8_t)((raw >> 16) & 0xFF),
+
+        };
+        HAL_UART_Transmit(&huart1, dbg, 6, 5);
+
         enc_update(id, raw);
         enc_pos[id] = (int64_t)enc_turns[id] * MT6825_RES + raw;
 

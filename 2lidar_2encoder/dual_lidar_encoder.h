@@ -10,8 +10,8 @@
  *   USART1  PA9/PA10   115200  -> Jetson
  *   USART2  PA2/PA3    460800  <- VB22A LEFT  (id=0)  + DMA1 CH6
  *   USART3  PB10/PB11  460800  <- VB22A RIGHT (id=1)  + DMA1 CH3
- *   SPI1    PA5/PA6/PA7        -> MT6825 x2
- *           PA4=CS_LEFT  PB0=CS_RIGHT
+ *   SPI1    PA5/PA6/PA7        -> MT6825 LEFT  (id=0)  | CS = PA4
+ *   SPI2    PB13/PB14/PB15     -> MT6825 RIGHT (id=1)  | CS = PB12
  *   TIM2    PA0/PA1    motor LEFT  CH1/CH2
  *   TIM3    PB4/PB5    motor RIGHT CH1/CH2 (partial remap)
  *   PC13    LED
@@ -44,7 +44,7 @@
 #define CS_LEFT_PORT     GPIOA
 #define CS_LEFT_PIN      GPIO_PIN_4
 #define CS_RIGHT_PORT    GPIOB
-#define CS_RIGHT_PIN     GPIO_PIN_0
+#define CS_RIGHT_PIN     GPIO_PIN_12
 
 /* VB22A frame */
 #define VB22A_HEADER     0x5C
