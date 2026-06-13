@@ -1,9 +1,18 @@
+<<<<<<< HEAD
+=======
+/* ============================================================
+ *  HTTP SERVER — serve JSON data + HTML page tren localhost
+ *  Khong dung thu vien ngoai, chi dung POSIX socket
+ *  Port: 8080 (chinh o WEB_PORT neu can)
+ * ============================================================ */
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 /**
  * main_combined2_filtered.cpp
  * Separate filtered variant for 2x VB22A LiDAR + 4x ultrasonic.
  * Does not overwrite existing grid_manager2.* files.
  *
  * Build:
+<<<<<<< HEAD
  * g++ -std=c++17 -O2 -lpthread ./web/main_web.cpp ./web/road_scanner.cpp -o lidar_us_lidar
  * 
  * Check data for UART PORT on Jetson:
@@ -15,6 +24,14 @@
 
 #include "grid_manager2.hpp"
 #include "road_scanner.hpp"
+=======
+ *   g++ -std=c++17 -O2 -lpthread main_combined2_filtered.cpp -o lidar_us2_filtered
+ * Run:
+ *   ./lidar_us2_filtered /dev/ttyTHS1 /dev/ttyUSB0
+ */
+
+#include "grid_manager2.hpp"
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,12 +43,16 @@
 #include <cmath>
 #include <mutex>
 #include <array>
+<<<<<<< HEAD
 #include <string>
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+<<<<<<< HEAD
                                    
 static std::atomic<bool> g_quit{false};
 static std::atomic<float> g_lidar_chui_y{0.0f}; // Khoảng cách y của tia chui xuống mặt đường, cập nhật từ RoadScanner
@@ -40,6 +61,15 @@ static void on_sig(int) { g_quit.store(true); }
 static constexpr float PI = 3.14159265358979323846f;
 static constexpr uint16_t LIDAR_MIN_MM = 10;
 static constexpr uint16_t LIDAR_MAX_MM = 20000;
+=======
+
+static std::atomic<bool> g_quit{false};
+static void on_sig(int) { g_quit.store(true); }
+
+static constexpr float PI = 3.14159265358979323846f;
+static constexpr uint16_t LIDAR_MIN_MM = 30;
+static constexpr uint16_t LIDAR_MAX_MM = 5000;
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 static constexpr float  LIDAR_MAX_ANGLE = 110.0f;
 
 struct FilteredMap {
@@ -49,11 +79,14 @@ struct FilteredMap {
     static constexpr uint8_t VAL_STRONG = THRESH_STRONG;
     static constexpr uint8_t VAL_EMPTY  = FREE;
 
+<<<<<<< HEAD
     // THÊM MỚI CHO ROAD SCANNER
     static constexpr uint8_t VAL_ROAD_FLAT = 128; // Mặt đường phẳng (Gray)
     static constexpr uint8_t VAL_POTHOLE   = 150; // Ổ gà sụt lún (Purple/Red)
     static constexpr uint8_t VAL_ROAD_OBS  = 250; // Vật cản nổi (từ RoadScanner)
 
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     std::mutex mutex;
     std::array<uint8_t, GRID_N * GRID_N> cells;
     std::array<uint8_t, GRID_N * GRID_N> hits;
@@ -73,10 +106,15 @@ struct FilteredMap {
         if (!valid_cell(gx, gy)) return;
         int idx = gy * GRID_N + gx;
         std::lock_guard<std::mutex> lock(mutex);
+<<<<<<< HEAD
         uint8_t new_hits = hits[idx] + (add*3);
 
         if (new_hits > 6 || new_hits < hits[idx]) new_hits = 6;
 
+=======
+        uint8_t new_hits = hits[idx] + add;
+        if (new_hits < hits[idx]) new_hits = 255;
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         hits[idx] = new_hits;
         if (src != 0) sources[idx] = src;
         if (hits[idx] >= HIT_STRONG) {
@@ -96,9 +134,13 @@ struct FilteredMap {
                 sources[i] = 0;
                 continue;
             }
+<<<<<<< HEAD
             if (hits[i] <= 3) hits[i] = 0;
             else hits[i] -= 3;
 
+=======
+            hits[i] -= 1;
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
             if (hits[i] >= HIT_STRONG) {
                 cells[i] = VAL_STRONG;
             } else if (hits[i] >= HIT_LIGHT) {
@@ -136,7 +178,10 @@ public:
 
     void start();
     void stop();
+<<<<<<< HEAD
     void mark_xy(float wx, float wy, uint8_t weight, uint8_t src);
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     void snapshot(uint8_t* dst) { filtered_.snapshot(dst); }
     void snapshot(uint8_t* dst, uint8_t* src_dst) { filtered_.snapshot(dst, src_dst); }
     uint32_t lidar_pts() const { return lidar_count_.load(); }
@@ -144,18 +189,25 @@ public:
     uint16_t last_lidar_dist_mm(int id) const { return last_lidar_dist_mm_[id].load(std::memory_order_relaxed); }
     int32_t last_lidar_angle_tenths(int id) const { return last_lidar_angle_tenths_[id].load(std::memory_order_relaxed); }
     float last_us_cm(int idx) const { return last_us_cm_[idx].load(std::memory_order_relaxed); }
+<<<<<<< HEAD
     using LidarBypassCb = std::function<void(float angle, uint16_t dist, uint32_t ts)>;
     void set_lidar_bypass(int target_id, LidarBypassCb cb) {
         bypass_id_ = target_id;
         bypass_cb_ = cb;
     }
+=======
+
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 private:
     std::string lidar_dev_, us_dev_;
     int         lidar_baud_, us_baud_;
     int         lidar_fd_ = -1;
     int         us_fd_    = -1;
+<<<<<<< HEAD
     int           bypass_id_ = -1;       // ID muốn chặn (ví dụ = 1)
     LidarBypassCb bypass_cb_ = nullptr;  // Hàm callback để bắn dữ liệu đi
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 
     SpscQ<LidarPoint, 512> lidar_q_;
     SpscQ<UsPoint,    64>  us_q_;
@@ -179,7 +231,11 @@ private:
     void uart_close(int& fd);
     bool parse_lidar(const uint8_t* b, LidarPoint& o);
     bool parse_us_json(const char* line, UsPoint& o);
+<<<<<<< HEAD
     
+=======
+    void mark_xy(float wx, float wy, uint8_t weight, uint8_t src);
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     void mark_lidar(const LidarPoint& p);
     void mark_us(const UsPoint& p);
     void lidar_reader_loop();
@@ -299,12 +355,15 @@ void FilteredCombinedManager::lidar_reader_loop() {
         LidarPoint lp;
         if (parse_lidar(pkt, lp)) {
             pkts++;
+<<<<<<< HEAD
             // Chan du lieu tu 1 lidar 
             if (lp.id == bypass_id_ && bypass_cb_ != nullptr) {
                 bypass_cb_(lp.angle_deg, lp.dist_mm, lp.ts_ms);
                 continue; // Chặn đứng tại đây, không cho nạp vào map né vật cản chính nữa!
             }
 
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
             if (lp.id < 2) {
                 last_lidar_dist_mm_[lp.id].store(lp.dist_mm, std::memory_order_relaxed);
                 last_lidar_angle_tenths_[lp.id].store((int32_t)std::lround(lp.angle_deg * 10.0f),
@@ -420,7 +479,11 @@ void FilteredCombinedManager::stop() {
 
 static constexpr int WEB_PORT = 8080;
 
+<<<<<<< HEAD
 /* HTML + JS page */
+=======
+/* HTML + JS page — nhung thang vao string literal */
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
 <html>
 <head>
@@ -443,7 +506,10 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   <div id="info">
     <span class="badge" id="l0">L0: --</span>
     <span class="badge" id="l1">L1: --</span>
+<<<<<<< HEAD
     <span class="badge" id="lidar-chui">LiDAR Chúi: <span id="lidar-chui-dist">--</span></span>
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     <span class="badge" id="u1">US1: --</span>
     <span class="badge" id="u2">US2: --</span>
     <span class="badge" id="u3">US3: --</span>
@@ -452,6 +518,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   </div>
 </div>
 <script>
+<<<<<<< HEAD
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
@@ -489,12 +556,62 @@ function drawGrid(cells, sources, ox, oy, grid_n) {
 
       for (let dy = 0; dy < CELL; dy++) {
         const row = (sy * CELL + dy) * currentWidth * 4 + gx * CELL * 4;
+=======
+const GRID = 100;
+const CELL = 6; // pixel per cell
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width  = GRID * CELL;
+canvas.height = GRID * CELL;
+
+// Color map: value 0..255 -> rgba
+// 0=black, 80..199=blue faint, 200..255=cyan strong
+// source: 1=L left, 2=R right, 3..6=US 1..4
+const SRC_COLORS = ['','#00e5ff','#00e5ff','#ffeb3b','#ffeb3b','#ff9800','#ff9800'];
+
+function cellColor(val, src) {
+  if (src >= 1 && src <= 6) return SRC_COLORS[src];
+  if (val >= 200) return '#00e5ff';
+  if (val >= 80)  return '#1a3a4a';
+  return '#111';
+}
+
+// Pre-allocate ImageData for zero flicker
+const imgData = ctx.createImageData(canvas.width, canvas.height);
+const px = imgData.data;
+
+function drawGrid(cells, sources, ox, oy) {
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const idx = gy * GRID + gx;
+      const val = cells[idx];
+      const src = sources[idx];
+
+      // Screen Y: flip (grid Y up = screen Y down)
+      const sy = (GRID - 1 - gy);
+
+      let r, g, b;
+      if (gx === ox && gy === oy) { r=255; g=255; b=0; }        // xe = yellow
+      else if (src >= 1 && src <= 2) { r=0; g=229; b=255; }     // LiDAR = cyan
+      else if (src >= 3 && src <= 6) { r=255; g=180; b=0; }     // US = orange
+      else if (val >= 200) { r=0;  g=180; b=255; }              // strong = blue
+      else if (val >= 80)  { r=0;  g=60;  b=90; }               // faint
+      else                 { r=17; g=17;  b=17; }               // empty
+
+      const px_base = (sy * GRID * CELL + gx) * CELL;
+      for (let dy = 0; dy < CELL; dy++) {
+        const row = (sy * CELL + dy) * GRID * CELL * 4 + gx * CELL * 4;
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         for (let dx = 0; dx < CELL; dx++) {
           const p = row + dx * 4;
           px[p]   = r;
           px[p+1] = g;
           px[p+2] = b;
+<<<<<<< HEAD
           px[p+3] = 255; 
+=======
+          px[p+3] = 255;
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         }
       }
     }
@@ -507,7 +624,11 @@ async function fetchData() {
     const res = await fetch('/data');
     const d = await res.json();
 
+<<<<<<< HEAD
     drawGrid(d.cells, d.sources, d.ox, d.oy, d.grid_n);
+=======
+    drawGrid(d.cells, d.sources, d.ox, d.oy);
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 
     document.getElementById('status').textContent =
       `lidar=${d.lidar_pts}  us=${d.us_pts}  ${d.hz.toFixed(0)} pts/s`;
@@ -527,11 +648,14 @@ async function fetchData() {
     ['u1','u2','u3','u4'].forEach((id,i) => {
       document.getElementById(id).textContent = `US${i+1}: ${uf(d['us'+i])}`;
     });
+<<<<<<< HEAD
 
     // Cập nhật khoảng cách LiDAR chúi
     const lcDist = (d.lidar_chui_y !== undefined) ? d.lidar_chui_y.toFixed(2) + " m" : "-- m";
     document.getElementById('lidar-chui-dist').innerText = lcDist;
 
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
 
   } catch(e) {
@@ -539,6 +663,10 @@ async function fetchData() {
   }
 }
 
+<<<<<<< HEAD
+=======
+// Poll 10 FPS, staggered — dam bao khong chong cheo
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 let running = false;
 async function loop() {
   if (!running) {
@@ -561,7 +689,10 @@ struct WebState {
     uint8_t             sources[GRID_N * GRID_N];
     uint32_t            lidar_pts = 0;
     uint32_t            us_pts    = 0;
+<<<<<<< HEAD
     float               lidar_chui_y = 0;
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     float               hz        = 0;
     uint16_t            l_mm [2]  = {0xFFFF, 0xFFFF};
     int32_t             l_a10[2]  = {0, 0};
@@ -570,6 +701,7 @@ struct WebState {
 static WebState g_web;
 
 /* Cap nhat WebState tu main loop */
+<<<<<<< HEAD
 static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) {
     std::lock_guard<std::mutex> lk(g_web.mtx);
     mgr.snapshot(g_web.cells, g_web.sources);
@@ -577,6 +709,12 @@ static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) 
 
     g_web.lidar_pts = mgr.lidar_pts();
     g_web.lidar_chui_y = g_lidar_chui_y.load();
+=======
+static void web_update(FilteredCombinedManager& mgr, float hz) {
+    std::lock_guard<std::mutex> lk(g_web.mtx);
+    mgr.snapshot(g_web.cells, g_web.sources);
+    g_web.lidar_pts = mgr.lidar_pts();
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     g_web.us_pts    = mgr.us_pts();
     g_web.hz        = hz;
     for (int i=0;i<2;i++){
@@ -588,24 +726,39 @@ static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) 
 
 /* Xu ly 1 HTTP connection */
 static void handle_client(int client_fd) {
+<<<<<<< HEAD
     /* Doc request */
+=======
+    /* Doc request (bo qua noi dung, chi phan biet path) */
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     char buf[512] = {};
     recv(client_fd, buf, sizeof(buf)-1, 0);
 
     bool is_data = (strstr(buf, "GET /data") != nullptr);
 
     if (is_data) {
+<<<<<<< HEAD
+=======
+        /* Tao JSON response */
+        char body[GRID_N * GRID_N * 5 + 512];
+        int  blen = 0;
+
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         /* Lock va lay snapshot */
         uint8_t cells  [GRID_N * GRID_N];
         uint8_t sources[GRID_N * GRID_N];
         uint32_t lpts, upts;
         float hz;
+<<<<<<< HEAD
         float lc_y; // bien tam thoi gia tri lidar chui-gemini
+=======
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         uint16_t lmm[2]; int32_t la10[2]; float ucm[4];
         {
             std::lock_guard<std::mutex> lk(g_web.mtx);
             memcpy(cells,   g_web.cells,   sizeof(cells));
             memcpy(sources, g_web.sources, sizeof(sources));
+<<<<<<< HEAD
 
             // Lay gia tri toan cuc-gemini
             lc_y = g_web.lidar_chui_y;
@@ -652,17 +805,54 @@ static void handle_client(int client_fd) {
             body += std::to_string((int)sources[i]);
         }
         body += "]}";
+=======
+            lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
+            for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
+            for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
+        }
+
+        /* cells array */
+        blen += snprintf(body+blen, sizeof(body)-blen,
+            "{\"ox\":%d,\"oy\":%d,"
+            "\"lidar_pts\":%u,\"us_pts\":%u,\"hz\":%.1f,"
+            "\"l0_mm\":%u,\"l0_a10\":%d,"
+            "\"l1_mm\":%u,\"l1_a10\":%d,"
+            "\"us0\":%.1f,\"us1\":%.1f,\"us2\":%.1f,\"us3\":%.1f,"
+            "\"cells\":[",
+            GRID_OX, GRID_OY,
+            lpts, upts, hz,
+            lmm[0], la10[0], lmm[1], la10[1],
+            ucm[0], ucm[1], ucm[2], ucm[3]);
+
+        for (int i = 0; i < GRID_N * GRID_N; i++) {
+            blen += snprintf(body+blen, sizeof(body)-blen,
+                             i ? ",%d" : "%d", cells[i]);
+        }
+        blen += snprintf(body+blen, sizeof(body)-blen, "],\"sources\":[");
+        for (int i = 0; i < GRID_N * GRID_N; i++) {
+            blen += snprintf(body+blen, sizeof(body)-blen,
+                             i ? ",%d" : "%d", sources[i]);
+        }
+        blen += snprintf(body+blen, sizeof(body)-blen, "]}");
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 
         char header[256];
         int hlen = snprintf(header, sizeof(header),
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: application/json\r\n"
             "Access-Control-Allow-Origin: *\r\n"
+<<<<<<< HEAD
             "Content-Length: %zu\r\n"
             "Connection: close\r\n\r\n", body.size());
 
         send(client_fd, header, hlen, 0);
         send(client_fd, body.data(), body.size(), 0);
+=======
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n", blen);
+        send(client_fd, header, hlen, 0);
+        send(client_fd, body,   blen, 0);
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
 
     } else {
         /* Tra ve HTML page */
@@ -700,19 +890,28 @@ static void http_server_thread() {
         socklen_t clen = sizeof(cli);
         int client = accept(srv, (struct sockaddr*)&cli, &clen);
         if (client < 0) continue;
+<<<<<<< HEAD
+=======
+        /* Xu ly trong thread rieng de khong block accept */
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
         std::thread([client]{ handle_client(client); }).detach();
     }
     close(srv);
 }
 
 /* ============================================================
+<<<<<<< HEAD
  * MAIN (Hỗ trợ Đánh chặn LiDAR Đuôi làm LiDAR Chúi quét ổ gà)
+=======
+ *  MAIN
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
  * ============================================================ */
 int main(int argc, char** argv) {
     std::signal(SIGINT,  on_sig);
     std::signal(SIGTERM, on_sig);
 
     const char* lidar_dev = (argc > 1) ? argv[1] : "/dev/ttyTHS1";
+<<<<<<< HEAD
     const char* road_dev  = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
     const char* us_dev    = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
     
@@ -776,6 +975,20 @@ int main(int argc, char** argv) {
     mgr.start();
     road_scanner.start();
 
+=======
+    const char* us_dev    = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
+
+    printf("=== LiDAR + Ultrasonic Web Visualizer ===\n");
+    printf("LiDAR : %s @ 115200\n", lidar_dev);
+    printf("US    : %s @ 115200\n", us_dev);
+    printf("Open  : http://<JETSON_IP>:%d\n\n", WEB_PORT);
+    fflush(stdout);
+
+    FilteredCombinedManager mgr(lidar_dev, us_dev);
+    mgr.start();
+
+    /* Khoi dong HTTP server thread */
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     std::thread http_thr(http_server_thread);
     http_thr.detach();
 
@@ -787,6 +1000,7 @@ int main(int argc, char** argv) {
         double   dt  = std::chrono::duration<double>(now - last_time).count();
         uint32_t lp  = mgr.lidar_pts();
         uint32_t up  = mgr.us_pts();
+<<<<<<< HEAD
         
         float    hz  = dt > 0.0 ? (float)((lp - last_lidar) + (up - last_us)) / dt : 0.0f;
         last_lidar = lp; 
@@ -803,5 +1017,18 @@ int main(int argc, char** argv) {
     road_scanner.stop();
     
     printf("Successfully stopped. Total processed: lidar=%u us=%u\n", mgr.lidar_pts(), mgr.us_pts());
+=======
+        float    hz  = dt > 0.0 ? (float)((lp-last_lidar)+(up-last_us))/dt : 0.0f;
+        last_lidar = lp; last_us = up; last_time = now;
+
+        web_update(mgr, hz);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); /* 20Hz update */
+    }
+
+    printf("Stopping...\n");
+    mgr.stop();
+    printf("Total: lidar=%u us=%u\n", mgr.lidar_pts(), mgr.us_pts());
+>>>>>>> adc9af6e6420ab728f55b36631d2ce16a0120963
     return 0;
 }
