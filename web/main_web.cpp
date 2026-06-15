@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <utility>
 #include <array>
 #include <string>
 #include <fcntl.h>
@@ -34,8 +35,50 @@
 #include <arpa/inet.h>
                                    
 static std::atomic<bool> g_quit{false};
-static std::atomic<float> g_lidar_chui_y{0.0f}; // Khoảng cách y của tia chui xuống mặt đường, cập nhật từ RoadScanner
 static void on_sig(int) { g_quit.store(true); }
+
+/* ============================================================
+ * RoadScanner event state cho web (LiDAR chui)
+ * ------------------------------------------------------------
+ * Truoc day chi co 1 bien g_lidar_chui_y atomic<float>, chi duoc
+ * on_obstacle ghi -> badge va cham mau tren canvas (do on_pothole
+ * khong gioi han wy, on_obstacle co gioi han 0.5<wy<1.75) co the
+ * lech pha nhau, va gia tri cu khong bao gio bi xoa nen badge hien
+ * thi "ma" sau khi cham da decay khoi map.
+ *
+ * Sua: dung 1 struct co timestamp, ca pothole va obstacle deu ghi
+ * vao day (cung dieu kien loc wy), web se hien "--" neu su kien da
+ * cu hon ROAD_EVENT_STALE_MS.
+ * ============================================================ */
+static constexpr int ROAD_EVENT_STALE_MS = 500;
+
+enum class RoadEventType { NONE = 0, POTHOLE = 1, OBSTACLE = 2 };
+
+struct RoadEventState {
+    std::mutex mtx;
+    float      y    = 0.0f;
+    RoadEventType type = RoadEventType::NONE;
+    std::chrono::steady_clock::time_point ts = std::chrono::steady_clock::now();
+
+    void update(float wy, RoadEventType t) {
+        std::lock_guard<std::mutex> lk(mtx);
+        y  = wy;
+        type = t;
+        ts = std::chrono::steady_clock::now();
+    }
+
+    /* Tra ve (y, type) hien tai, hoac (-1, NONE) neu da qua cu */
+    std::pair<float, RoadEventType> snapshot() const {
+        std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(mtx));
+        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - ts).count();
+        if (type == RoadEventType::NONE || age_ms > ROAD_EVENT_STALE_MS) {
+            return {-1.0f, RoadEventType::NONE};
+        }
+        return {y, type};
+    }
+};
+static RoadEventState g_road_event;
 
 static constexpr float PI = 3.14159265358979323846f;
 static constexpr uint16_t LIDAR_MIN_MM = 10;
@@ -50,6 +93,7 @@ struct FilteredMap {
     static constexpr uint8_t VAL_EMPTY  = FREE;
 
     // THÊM MỚI CHO ROAD SCANNER
+
     static constexpr uint8_t VAL_ROAD_FLAT = 128; // Mặt đường phẳng (Gray)
     static constexpr uint8_t VAL_POTHOLE   = 150; // Ổ gà sụt lún (Purple/Red)
     static constexpr uint8_t VAL_ROAD_OBS  = 250; // Vật cản nổi (từ RoadScanner)
@@ -433,7 +477,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   canvas { image-rendering:pixelated; border:1px solid #333; }
   #info { margin-top:8px; font-size:12px; color:#aaa; display:flex; gap:24px; }
   .badge { background:#222; padding:4px 8px; border-radius:4px; }
-  .ok { color:#4f4; } .warn { color:#fa4; }
+  .ok { color:#4f4; } .warn { color:#fa4; } .pothole { color:#f4f; }
 </style>
 </head>
 <body>
@@ -443,7 +487,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   <div id="info">
     <span class="badge" id="l0">L0: --</span>
     <span class="badge" id="l1">L1: --</span>
-    <span class="badge" id="lidar-chui">LiDAR Chúi: <span id="lidar-chui-dist">--</span></span>
+    <span class="badge" id="lidar-chui"><span id="lidar-chui-label">LiDAR chúi</span>: <span id="lidar-chui-dist">--</span></span>
     <span class="badge" id="u1">US1: --</span>
     <span class="badge" id="u2">US2: --</span>
     <span class="badge" id="u3">US3: --</span>
@@ -528,9 +572,14 @@ async function fetchData() {
       document.getElementById(id).textContent = `US${i+1}: ${uf(d['us'+i])}`;
     });
 
-    // Cập nhật khoảng cách LiDAR chúi
-    const lcDist = (d.lidar_chui_y !== undefined) ? d.lidar_chui_y.toFixed(2) + " m" : "-- m";
+    // Cập nhật khoảng cách LiDAR chúi (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
+    const lcType  = d.lidar_chui_type || 0;
+    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR chúi');
+    const lcDist  = (d.lidar_chui_y >= 0) ? d.lidar_chui_y.toFixed(2) + " m" : "--";
+    document.getElementById('lidar-chui-label').textContent = lcLabel;
     document.getElementById('lidar-chui-dist').innerText = lcDist;
+    document.getElementById('lidar-chui').className =
+      'badge ' + (lcType === 1 ? 'pothole' : (lcType === 2 ? 'warn' : ''));
 
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
 
@@ -561,7 +610,8 @@ struct WebState {
     uint8_t             sources[GRID_N * GRID_N];
     uint32_t            lidar_pts = 0;
     uint32_t            us_pts    = 0;
-    float               lidar_chui_y = 0;
+    float               lidar_chui_y    = -1.0f; /* -1 = chua co su kien / da cu */
+    int                 lidar_chui_type = 0;      /* 0=none, 1=pothole, 2=obstacle */
     float               hz        = 0;
     uint16_t            l_mm [2]  = {0xFFFF, 0xFFFF};
     int32_t             l_a10[2]  = {0, 0};
@@ -571,12 +621,17 @@ static WebState g_web;
 
 /* Cap nhat WebState tu main loop */
 static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) {
+    (void)rs; // chua dung truc tiep: du lieu RoadScanner di qua g_road_event (xem on_pothole/on_obstacle)
     std::lock_guard<std::mutex> lk(g_web.mtx);
     mgr.snapshot(g_web.cells, g_web.sources);
     
 
     g_web.lidar_pts = mgr.lidar_pts();
-    g_web.lidar_chui_y = g_lidar_chui_y.load();
+    {
+        auto [y, type] = g_road_event.snapshot();
+        g_web.lidar_chui_y    = y;
+        g_web.lidar_chui_type = (int)type;
+    }
     g_web.us_pts    = mgr.us_pts();
     g_web.hz        = hz;
     for (int i=0;i<2;i++){
@@ -600,15 +655,16 @@ static void handle_client(int client_fd) {
         uint8_t sources[GRID_N * GRID_N];
         uint32_t lpts, upts;
         float hz;
-        float lc_y; // bien tam thoi gia tri lidar chui-gemini
+        float lc_y;  // gia tri Y cua su kien o ga/vat can gan nhat (-1 = khong co/da cu)
+        int   lc_type; // 0=none, 1=pothole, 2=obstacle
         uint16_t lmm[2]; int32_t la10[2]; float ucm[4];
         {
             std::lock_guard<std::mutex> lk(g_web.mtx);
             memcpy(cells,   g_web.cells,   sizeof(cells));
             memcpy(sources, g_web.sources, sizeof(sources));
 
-            // Lay gia tri toan cuc-gemini
-            lc_y = g_web.lidar_chui_y;
+            lc_y    = g_web.lidar_chui_y;
+            lc_type = g_web.lidar_chui_type;
             lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
             for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
             for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
@@ -636,7 +692,8 @@ static void handle_client(int client_fd) {
         body += "\"us1\":" + std::to_string(ucm[1]) + ",";
         body += "\"us2\":" + std::to_string(ucm[2]) + ",";
         body += "\"us3\":" + std::to_string(ucm[3]) + ",";
-        body += "\"lidar_chui_y\":" + std::to_string(g_web.lidar_chui_y) + ",";
+        body += "\"lidar_chui_y\":" + std::to_string(lc_y) + ",";
+        body += "\"lidar_chui_type\":" + std::to_string(lc_type) + ",";
 
         // 2. Nối mảng cells
         body += "\"cells\":[";
@@ -732,39 +789,42 @@ int main(int argc, char** argv) {
     RoadScanner road_scanner(road_dev, 115200);
 
 
-    //Callback xử lý ổ gà 
-    road_scanner.on_pothole([&mgr](const RoadSample& sample) {
-
+    //Callback xử lý ổ gà
+    road_scanner.on_pothole([&mgr, &road_scanner](const RoadSample& sample) {
         // Với 1 tia cố định, tọa độ X (ngang) luôn bằng 0 (nằm giữa đầu xe).
         float wx = 0.0f;
 
-        // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_chui) + khoảng_cách_gắn_lidar
-        // Góc chúi ~ 9.6 độ -> cos(9.6) ~ 0.986. Giả sử LiDAR gắn cách tâm xe 0.8m (LIDAR_OY)
-        float wy = (sample.dist_ema_m * cos(PITCH_STATIC_RAD)) + 0.8f;
+        // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_chui) + khoảng_cách_gắn_lidar.
+        // Dùng góc chúi đã TỰ CALIB (baseline_pitch_rad) thay cho PITCH_STATIC_RAD
+        // thiết kế, để khớp với góc mà road_scanner đang dùng để tính delta.
+        float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
-        mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10); // mau hong
+        // Cùng giới hạn vùng quan tâm phía trước xe như on_obstacle, để 2 loại
+        // sự kiện đối xứng nhau trên bản đồ/badge.
+        if (wy > 0.5f && wy < 1.75f) {
+            g_road_event.update(wy, RoadEventType::POTHOLE);
+            mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10);
+        }
     });
 
     // Callback xử lý gờ giảm tốc/vật cản (Khoảng cách đột ngột NGẮN lại)
-    road_scanner.on_obstacle([&mgr](const RoadSample& sample) {
-      // Biến static để lưu thời gian của lần kích hoạt gần nhất
+    road_scanner.on_obstacle([&mgr, &road_scanner](const RoadSample& sample) {
+        // Biến static để lưu thời gian của lần kích hoạt gần nhất
         static auto last_trigger = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
-        
-        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa)
+
+        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa), dùng góc chúi tự calib
         float wx = 0.0f;
-        float wy = (sample.dist_ema_m * cos(PITCH_STATIC_RAD)) + 0.8f; 
-
-
+        float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
         // Đánh dấu lên map (hàm này chạy rất nhẹ, không lo tràn bộ nhớ)
-        if(wy > 0.5f && wy < 1.75f) {
-            g_lidar_chui_y.store(wy); 
-            mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11); // mau do
+        if (wy > 0.5f && wy < 1.75f) {
+            g_road_event.update(wy, RoadEventType::OBSTACLE);
+            mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11);
         } else {
             return;
         }
-        
+
         // RATE-LIMIT: Chỉ cho phép in log tối đa 5 lần/giây (mỗi 200ms)
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= 200) {
             printf("[LiDAR Chúi] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
