@@ -1,226 +1,213 @@
 /**
  * road_scanner.hpp
  * ============================================================
- * LiDAR VB22A chui xuong quet mat duong tu dau xe
+ * LiDAR VB22A 1 tia, co dinh, chui xuong mat duong
  *
- * Mo hinh hinh hoc:
- *   - LiDAR gan o do cao H_MOUNT = 1.0m so voi mat duong
- *   - Goc chui xuong co dinh (do co khi): PITCH_STATIC_DEG ~ 9.6 do
- *     (arcsin(1.0/6.0) = 9.594 do khi slant range = 6m)
- *   - Khi xe thang / vuot o ga: phuoc nen -> xe nghieng them PITCH_DYNAMIC
- *   - LiDAR quet qua lai theo goc SCAN, moi goc cho 1 gia tri dist
+ * HINH HOC (LiDAR khong xoay):
  *
- * Cong thuc tinh chieu cao mat duong tai goc quet (scan_deg):
- *   total_pitch = pitch_static + pitch_dynamic   (rad)
- *   total_angle = total_pitch + scan_deg_to_rad
- *   h_road = dist * sin(total_angle)
- *   x_road = dist * cos(total_angle) * sin(scan_deg)
- *   y_road = dist * cos(total_angle) * cos(scan_deg) + LIDAR_OFFSET_Y
+ *         LiDAR (h=1m)
+ *             *
+ *              \  <- 1 tia co dinh
+ *               \  slant = 6m
+ *                \  goc pitch = arcsin(1/6) ~ 9.6 do
+ *                 \
+ *   _______________*____________  mat duong
+ *                  ^
+ *                  diem chieu (5.9m phia truoc)
  *
- * Phat hien o ga:
- *   - Tinh h_road tai moi diem
- *   - Mat duong phang: h_road xap xi H_MOUNT (sai so < POTHOLE_THRESHOLD)
- *   - O ga: h_road > H_MOUNT + POTHOLE_THRESHOLD (diem o sau hon)
- *   - Goc cao: h_road < H_MOUNT - OBSTACLE_THRESHOLD (vat can phia truoc)
+ * PHAT HIEN O GA:
+ *   - Tinh "dist_ground_expected" = khoang cach khi mat phang
+ *     = H_MOUNT / sin(pitch_total)
+ *   - O ga: dist_measured > expected + POTHOLE_THRESH
+ *     (tia xuyen qua o, chieu xa hon)
+ *   - Vat can: dist_measured < expected - OBSTACLE_THRESH
+ *     (co vat chan tia lai)
  *
- * Loc nhieu rung phuoc:
- *   - Dung EMA (Exponential Moving Average) cho dist
- *   - Dung median filter 3-mau cho phat hien su kien
- *   - Chi bao cao o ga neu lien tuc N_CONFIRM mau lien tiep
+ * BU PHUOC (suspension compensation):
+ *   - Khi xe thang: phuoc nen, mui xe chui xuong them ~2-5 do
+ *   - pitch_total = PITCH_STATIC + pitch_from_suspension
+ *   - expected_dist thay doi -> tranh bao dong gia
+ *   - set_suspension(compression_mm) de cap nhat
+ *
+ * LOC NHIEU RUNG:
+ *   - EMA alpha=0.15 cho dist (loc rung phuoc 5-15Hz)
+ *   - Confirm N=3 mau lien tiep (15ms) truoc khi bao cao
+ *   - Baseline hoc tu 50 mau dau (khong bao cao trong giai doan hoc)
+ *
+ * OUTPUT:
+ *   - road_timeline: mang dist theo thoi gian (ve bieu do)
+ *   - pothole_events: danh sach vi tri o ga phat hien
+ *   - callback khi phat hien su kien
  * ============================================================
  */
 #pragma once
+#include <math.h>
 #include <cstdint>
 #include <cmath>
 #include <array>
+#include <deque>
 #include <string>
 #include <atomic>
 #include <thread>
 #include <mutex>
 #include <functional>
 #include <cstring>
+#include <vector>
 
 /* ============================================================
- * CAU HINH HINH HOC (chinh theo xe thuc te)
+ * CAU HINH HINH HOC
  * ============================================================ */
-
-/* Do cao LiDAR so voi mat duong khi xe dung yen (m) */
-static constexpr float H_MOUNT = 1.0f;
-
-/* Slant range khi quet thang (m) - dung de tinh goc mac dinh */
-static constexpr float SLANT_RANGE_REF = 6.0f;
-
-/* Goc chui xuong co dinh (rad)
- * = arcsin(H_MOUNT / SLANT_RANGE_REF) = arcsin(1/6) ~ 0.1674 rad ~ 9.59 do
- * Chinh lai bang cach do thuc te: dat thuoc ngang 6m truoc xe,
- * lam mat phang, doc dist tu LiDAR, tinh lai goc */
-static constexpr float PITCH_STATIC_RAD =
-    0.16745f; /* arcsin(1.0/6.0) */
-
-/* Do nhay phuoc: bao nhieu rad moi mm phuoc nen
- * Phuoc xe may dien hinh: hanh trinh 100mm ~ 5 do nghieng mui xe
- * -> 5*pi/180 / 100 = 0.000873 rad/mm
- * Chinh lai sau khi do thuc te */
-static constexpr float PITCH_PER_MM_SUSPENSION = 0.000873f;
-
-/* Vi tri LiDAR tren xe (m, tu tam xe) */
-static constexpr float LIDAR_OFFSET_Y = 0.8f;  /* 80cm phia truoc */
-static constexpr float LIDAR_OFFSET_X = 0.0f;  /* giua xe */
+// Góc chúi xuống là góc giữa tia laser và phương nằm ngang
+static constexpr float H_MOUNT          = 1.0f;    /* m - do cao LiDAR */
+static constexpr float SLANT_RANGE_REF  = 2.0f;    /* m - slant range toi mat phang */
+static const float PITCH_STATIC_RAD = asin(H_MOUNT / SLANT_RANGE_REF); /* rad - goc chui khi mat phang */
+static constexpr float PITCH_PER_MM     = 0.000873f;/* rad/mm phuoc nen */
+ 
+/* X,Y offset LiDAR so voi tam xe */
+static constexpr float LIDAR_OX = 0.0f;
+static constexpr float LIDAR_OY = 0.8f; /* 80cm phia truoc */
 
 /* ============================================================
  * NGUONG PHAT HIEN
  * ============================================================ */
-
-/* O ga: h_road > H_MOUNT + nguong nay thi coi la o ga (m)
- * 0.05m = 5cm do sau -> dieu chinh theo do nhay mong muon */
-static constexpr float POTHOLE_DEPTH_THRESH = 0.05f;
-
-/* Vat can: h_road < H_MOUNT - nguong nay (m)
- * Vat cao hon mat duong > 3cm */
-static constexpr float OBSTACLE_HEIGHT_THRESH = 0.03f;
-
-/* Slant range toi da hop le (m) - qua day la nhieu hoac khong co gi */
-static constexpr float DIST_MAX_VALID = 8.0f;
-
-/* Slant range toi thieu hop le (m) */
-static constexpr float DIST_MIN_VALID = 0.3f;
+static constexpr float POTHOLE_THRESH_M  = 0.05f; /* o ga: 5cm sau */
+static constexpr float OBSTACLE_THRESH_M = 0.05f; /* vat can: 5cm cao */
+static constexpr float DIST_MAX_M        = 9.0f;
+static constexpr float DIST_MIN_M        = 0.3f;
 
 /* ============================================================
- * BO LOC NHIEU
+ * BO LOC
  * ============================================================ */
-
-/* He so EMA cho dist: alpha ~ 0.3 la trung binh
- * alpha cao (0.7-0.9): phan ung nhanh, nhieu nhieu
- * alpha thap (0.1-0.3): mat phan ung, loc nhieu tot
- * Phuoc xe may rung ~5-15Hz, LiDAR 200Hz -> alpha=0.15 la hop ly */
-static constexpr float EMA_ALPHA = 0.15f;
-
-/* So mau lien tiep can de xac nhan o ga / vat can
- * LiDAR 200Hz -> 3 mau = 15ms, du de loai bo nhieu xung */
-static constexpr int N_CONFIRM = 3;
+static constexpr float EMA_ALPHA    = 0.15f; /* loc rung phuoc */
+static constexpr int   N_CONFIRM    = 3;     /* mau lien tiep de xac nhan */
+static constexpr int   N_BASELINE   = 50;    /* so mau hoc baseline ban dau */
+static constexpr int   TIMELINE_LEN = 300;   /* luu 300 diem gan nhat de ve */
 
 /* ============================================================
- * GRID CHO MAT DUONG (rieng voi obstacle grid)
- * Ghi nhan chieu cao tuong doi so voi H_MOUNT
- * Gia tri 128 = mat phang, > 128 = o ga, < 128 = vat can
+ * PACKET (10 bytes tu STM32)
  * ============================================================ */
-static constexpr int ROAD_GRID_N = 100;
-static constexpr float ROAD_CELL_M = 0.10f;  /* 10cm moi o (lon hon obstacle grid) */
-static constexpr int ROAD_OX = ROAD_GRID_N / 2;
-static constexpr int ROAD_OY = ROAD_GRID_N / 2;
+static constexpr uint8_t RD_HDR = 0xAA;
+static constexpr uint8_t RD_FTR = 0x55;
+static constexpr int     RD_PKT = 10;
 
 /* ============================================================
- * PACKET LIDAR (14 bytes, giong cu)
+ * STRUCTS
  * ============================================================ */
-constexpr uint8_t ROAD_PKT_HDR = 0xAA;
-constexpr uint8_t ROAD_PKT_FTR = 0x55;
-constexpr int     ROAD_PKT_LEN = 14;
-
-/* ============================================================
- * CAC STRUCT
- * ============================================================ */
-
-/* Mot diem do tu LiDAR */
-struct RawScanPoint {
-    float    angle_deg;   /* goc quet tu encoder (-90..+90) */
-    uint16_t dist_mm;     /* khoang cach slant (mm) */
+struct RoadSample {
     uint32_t ts_ms;
+    float    dist_raw_m;     /* tu VB22A, chua loc */
+    float    dist_ema_m;     /* sau EMA */
+    float    dist_expect_m;  /* khoang cach du kien khi mat phang */
+    float    delta_m;        /* dist_ema - dist_expect (am=o ga, duong=vat can) */
+    bool     is_pothole;
+    bool     is_obstacle;
+    bool     is_valid;
 };
 
-/* Ket qua sau khi xu ly hinh hoc */
-struct RoadPoint {
-    float wx, wy;         /* toa do mat dat (m, he toa do xe) */
-    float h_road;         /* chieu cao do lai so voi mat dat (m) */
-    float h_delta;        /* = h_road - H_MOUNT (am=o ga, duong=vat can) */
-    bool  is_pothole;     /* o ga? */
-    bool  is_obstacle;    /* vat can? */
+struct PotholeEvent {
     uint32_t ts_ms;
-};
-
-/* Trang thai phuoc (doc tu cam bien hoac uoc tinh) */
-struct SuspensionState {
-    float compression_mm = 0.0f;  /* do nen phuoc (mm), 0=binh thuong */
-    float pitch_add_rad  = 0.0f;  /* goc nghieng them do phuoc (rad) */
+    float    depth_m;   /* uoc tinh do sau o ga */
+    float    x_ahead_m; /* khoang cach phia truoc xe toi o ga */
 };
 
 /* ============================================================
- * ROAD SCANNER CLASS
+ * ROAD SCANNER
  * ============================================================ */
 class RoadScanner {
 public:
-    /* Grid chieu cao mat duong: 0=chua biet, 128=phang, >128=o ga, <128=vat can */
-    uint8_t road_grid[ROAD_GRID_N * ROAD_GRID_N];
-
     explicit RoadScanner(std::string dev, int baud = 115200)
         : dev_(std::move(dev)), baud_(baud) {}
 
     void start();
     void stop();
 
-    /* Cap nhat trang thai phuoc tu nguon ben ngoai
-     * (co the lay tu IMU, cam bien hanh trinh, hoac uoc tinh tu gia toc) */
+    /* Cap nhat trang thai phuoc (mm nen) */
     void set_suspension(float compression_mm) {
-        susp_.compression_mm = compression_mm;
-        susp_.pitch_add_rad  = compression_mm * PITCH_PER_MM_SUSPENSION;
+        float pr = compression_mm * PITCH_PER_MM;
+        pitch_dynamic_.store(*reinterpret_cast<uint32_t*>(&pr));
     }
 
-    /* Lay snapshot road_grid an toan */
-    void snapshot_road(uint8_t* dst) const {
-        std::memcpy(dst, road_grid, sizeof(road_grid));
+    /* Lay timeline gan nhat de ve web */
+    void get_timeline(std::vector<RoadSample>& out) const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        out.assign(timeline_.begin(), timeline_.end());
     }
 
-    uint32_t pothole_count() const { return pothole_cnt_.load(); }
-    uint32_t obstacle_count() const { return obstacle_cnt_.load(); }
-    uint32_t point_count() const { return point_cnt_.load(); }
+    /* Lay danh sach o ga */
+    void get_potholes(std::vector<PotholeEvent>& out) const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        out = potholes_;
+    }
 
-    /* Callback khi phat hien o ga hoac vat can */
-    using AlertCb = std::function<void(const RoadPoint&)>;
-    void on_pothole(AlertCb cb)  { cb_pothole_  = std::move(cb); }
-    void on_obstacle(AlertCb cb) { cb_obstacle_ = std::move(cb); }
+    uint32_t pts()       const { return pts_.load(); }
+    uint32_t n_pothole() const { return npot_.load(); }
+    uint32_t n_obstacle()const { return nobs_.load(); }
+
+    float last_dist_m()  const { return last_dist_.load() / 1000.0f; }
+    float last_delta_m() const {
+        uint32_t v = last_delta_raw_.load();
+        return *reinterpret_cast<const float*>(&v);
+    }
+
+    using Cb = std::function<void(const RoadSample&)>;
+    void on_pothole (Cb c) { cb_pot_ = std::move(c); }
+    void on_obstacle(Cb c) { cb_obs_ = std::move(c); }
 
 private:
-    std::string dev_;
-    int         baud_;
-    int         fd_ = -1;
+    std::string dev_; int baud_; int fd_ = -1;
 
     std::atomic<bool>     running_{false};
-    std::atomic<uint32_t> pothole_cnt_{0};
-    std::atomic<uint32_t> obstacle_cnt_{0};
-    std::atomic<uint32_t> point_cnt_{0};
+    std::atomic<uint32_t> pts_{0}, npot_{0}, nobs_{0};
+    std::atomic<uint32_t> last_dist_{0xFFFF};
+    std::atomic<uint32_t> pitch_dynamic_{0};
+    std::atomic<uint32_t> last_delta_raw_{0};
 
-    SuspensionState susp_;
+    Cb cb_pot_ = nullptr;
+    Cb cb_obs_ = nullptr;
 
-    AlertCb cb_pothole_;
-    AlertCb cb_obstacle_;
+    mutable std::mutex           mtx_;
+    std::deque<RoadSample>       timeline_;
+    std::vector<PotholeEvent>    potholes_;
 
-    /* EMA filter state per scan angle bin (360 bins, -180..+180 do) */
-    static constexpr int N_ANGLE_BINS = 360;
-    float ema_dist_[N_ANGLE_BINS];
-    bool  ema_init_[N_ANGLE_BINS];
+    /* EMA state */
+    float   ema_dist_  = 0.0f;
+    bool    ema_init_  = false;
 
-    /* Confirm buffer: dem bao nhieu mau lien tiep detect o ga */
-    int pothole_confirm_[N_ANGLE_BINS];
-    int obstacle_confirm_[N_ANGLE_BINS];
+    /* Baseline hoc */
+    int     baseline_n_    = 0;
+    float   baseline_sum_  = 0.0f;
+    float   baseline_dist_ = 0.0f; /* dist trung binh khi mat phang */
 
-    std::thread thr_reader_;
-    std::thread thr_proc_;
+    /* Confirm counters */
+    int pothole_confirm_  = 0;
+    int obstacle_confirm_ = 0;
 
-    /* SPSC queue don gian */
-    static constexpr int Q_CAP = 512;
-    RawScanPoint q_buf_[Q_CAP];
-    std::atomic<int> q_head_{0}, q_tail_{0};
-    bool q_push(const RawScanPoint& p);
-    bool q_pop(RawScanPoint& p);
+    /* SPSC queue */
+    static constexpr int Q = 256;
+    struct PktQ { uint16_t dist_mm; uint32_t ts; };
+    PktQ qbuf_[Q];
+    std::atomic<int> qh_{0}, qt_{0};
+    bool qpush(const PktQ& p);
+    bool qpop (PktQ& p);
+
+    std::thread thr_r_, thr_p_;
 
     bool uart_open();
     void uart_close();
-    bool parse_packet(const uint8_t* b, RawScanPoint& o);
+    bool parse(const uint8_t* b, uint16_t& dist_mm, uint32_t& ts);
     void reader_loop();
     void process_loop();
 
-    /* XU LY CHINH: tinh hinh hoc + loc nhieu + cap nhat grid */
-    RoadPoint compute_road_point(const RawScanPoint& raw);
-    void      update_grid(const RoadPoint& rp);
-    float     apply_ema(int angle_bin, float dist_m);
-    int       angle_to_bin(float angle_deg);
+    float get_pitch_dynamic() const {
+        uint32_t v = pitch_dynamic_.load();
+        return *reinterpret_cast<const float*>(&v);
+    }
+
+    /* Tinh khoang cach du kien khi mat dat phang */
+    float expected_dist(float pitch_total) const {
+        /* dist = H_MOUNT / sin(pitch_total) */
+        float sp = sinf(pitch_total);
+        if (sp < 0.01f) sp = 0.01f;
+        return H_MOUNT / sp;
+    }
 };

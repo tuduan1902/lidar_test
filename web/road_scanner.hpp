@@ -62,7 +62,7 @@ static constexpr float H_MOUNT          = 1.0f;    /* m - do cao LiDAR */
 static constexpr float SLANT_RANGE_REF  = 2.0f;    /* m - slant range toi mat phang */
 static const float PITCH_STATIC_RAD = asin(H_MOUNT / SLANT_RANGE_REF); /* rad - goc chui khi mat phang */
 static constexpr float PITCH_PER_MM     = 0.000873f;/* rad/mm phuoc nen */
-
+ 
 /* X,Y offset LiDAR so voi tam xe */
 static constexpr float LIDAR_OX = 0.0f;
 static constexpr float LIDAR_OY = 0.8f; /* 80cm phia truoc */

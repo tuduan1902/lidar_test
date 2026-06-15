@@ -1,11 +1,15 @@
 /**
  * road_scanner.cpp
- *
+ * ============================================================
+ * Implement cho LiDAR VB22A 1 tia, huong co dinh xuong mat duong.
+ * Khong con xu ly encoder hoac mang 2D.
  * Luong xu ly:
- *   reader_loop():  doc UART -> parse packet -> push queue
- *   process_loop(): pop queue -> EMA filter -> tinh hinh hoc
- *                   -> confirm logic -> cap nhat road_grid -> callback
+ * - reader_loop(): Doc UART (10 bytes), kiem tra checksum, day vao Queue.
+ * - process_loop(): Lay tu Queue, loc EMA, tinh toan hinh hoc bu phuoc, 
+ * phat hien o ga/vat can qua delta_m, luu vao timeline.
+ * ============================================================
  */
+
 #include "road_scanner.hpp"
 #include <fcntl.h>
 #include <termios.h>
@@ -14,12 +18,13 @@
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
+#include <chrono>
 
 /* ============================================================
- * UART
+ * UART / SERIAL INTERFACE
  * ============================================================ */
 bool RoadScanner::uart_open() {
-    /* Jetson THS UART: dung stty de set baud, sau do open O_RDONLY */
+    /* Set baudrate qua stty (chuyen dung cho Jetson/Linux) truoc khi mo */
     char cmd[160];
     snprintf(cmd, sizeof(cmd),
              "stty -F %s %d raw cs8 -parenb -cstopb -echo 2>/dev/null",
@@ -31,7 +36,7 @@ bool RoadScanner::uart_open() {
         printf("[Road] Cannot open %s: %s\n", dev_.c_str(), strerror(errno));
         return false;
     }
-    printf("[Road] %s @ %d OK\n", dev_.c_str(), baud_);
+    printf("[Road] Mở %s @ %d bps THÀNH CÔNG\n", dev_.c_str(), baud_);
     return true;
 }
 
@@ -40,319 +45,224 @@ void RoadScanner::uart_close() {
 }
 
 /* ============================================================
- * SPSC QUEUE (don gian, 1 producer 1 consumer)
+ * SPSC QUEUE (1 Producer - 1 Consumer)
  * ============================================================ */
-bool RoadScanner::q_push(const RawScanPoint& p) {
-    int h = q_head_.load(std::memory_order_relaxed);
-    int n = (h + 1) % Q_CAP;
-    if (n == q_tail_.load(std::memory_order_acquire)) return false; /* full */
-    q_buf_[h] = p;
-    q_head_.store(n, std::memory_order_release);
+bool RoadScanner::qpush(const PktQ& p) {
+    int h = qh_.load(std::memory_order_relaxed);
+    int next = (h + 1) % Q;
+    if (next == qt_.load(std::memory_order_acquire)) return false; /* Queue day */
+    qbuf_[h] = p;
+    qh_.store(next, std::memory_order_release);
     return true;
 }
 
-bool RoadScanner::q_pop(RawScanPoint& p) {
-    int t = q_tail_.load(std::memory_order_relaxed);
-    if (t == q_head_.load(std::memory_order_acquire)) return false; /* empty */
-    p = q_buf_[t];
-    q_tail_.store((t + 1) % Q_CAP, std::memory_order_release);
+bool RoadScanner::qpop(PktQ& p) {
+    int t = qt_.load(std::memory_order_relaxed);
+    if (t == qh_.load(std::memory_order_acquire)) return false; /* Queue rong */
+    p = qbuf_[t];
+    qt_.store((t + 1) % Q, std::memory_order_release);
     return true;
 }
 
 /* ============================================================
- * PARSE PACKET 14 BYTES
- * [0]=0xAA [1]=id [2..3]=dist_mm [4..5]=angle*10
- * [6..9]=ts [10..11]=enc_lo [12]=chk [13]=0x55
+ * PARSE PACKET (10 BYTES)
+ * Cau truc gia dinh tu STM32:
+ * [0]=0xAA [1,2]=dist_mm [3,4,5,6]=ts_ms [7,8]=... [8]=chk [9]=0x55
  * ============================================================ */
-bool RoadScanner::parse_packet(const uint8_t* b, RawScanPoint& o) {
-    if (b[0] != ROAD_PKT_HDR || b[ROAD_PKT_LEN-1] != ROAD_PKT_FTR)
-        return false;
+bool RoadScanner::parse(const uint8_t* b, uint16_t& dist_mm, uint32_t& ts) {
+    if (b[0] != RD_HDR || b[RD_PKT - 1] != RD_FTR) return false;
 
-    /* Checksum XOR bytes 1..11 */
+    /* Checksum XOR tu byte 1 den byte RD_PKT-3 */
     uint8_t chk = 0;
-    for (int i = 1; i <= ROAD_PKT_LEN-3; i++) chk ^= b[i];
-    if (chk != b[ROAD_PKT_LEN-2]) return false;
+    for (int i = 1; i < RD_PKT - 2; i++) {
+        chk ^= b[i];
+    }
+    if (chk != b[RD_PKT - 2]) return false;
 
-    o.dist_mm   = (uint16_t)b[2] | ((uint16_t)b[3] << 8);
-    int16_t a10 = (int16_t)((uint16_t)b[4] | ((uint16_t)b[5] << 8));
-    o.angle_deg = a10 / 10.0f;
-    o.ts_ms     = (uint32_t)b[6] | ((uint32_t)b[7]<<8) |
-                  ((uint32_t)b[8]<<16) | ((uint32_t)b[9]<<24);
+    /* Little Endian parse */
+    dist_mm = (uint16_t)b[1] | ((uint16_t)b[2] << 8);
+    ts = (uint32_t)b[3] | ((uint32_t)b[4] << 8) | 
+         ((uint32_t)b[5] << 16) | ((uint32_t)b[6] << 24);
+         
     return true;
 }
 
 /* ============================================================
- * THREAD 1: READER
- * Doc byte tu UART, tim header 0xAA, push vao queue
+ * THREAD 1: READER (Đọc byte và đẩy vào hàng đợi)
  * ============================================================ */
 void RoadScanner::reader_loop() {
-    printf("[Road Reader] started\n"); fflush(stdout);
+    printf("[Road Reader] Đã khởi chạy\n"); fflush(stdout);
 
-    uint8_t  pkt[ROAD_PKT_LEN], b;
-    uint32_t pkts = 0;
-
+    uint8_t pkt[RD_PKT], b;
+    
     while (running_.load(std::memory_order_relaxed)) {
-        /* Tim header */
+        /* Tim byte Header */
         if (::read(fd_, &b, 1) != 1) continue;
-        if (b != ROAD_PKT_HDR) continue;
+        if (b != RD_HDR) continue;
 
-        /* Doc 13 bytes con lai */
-        pkt[0] = ROAD_PKT_HDR;
+        pkt[0] = RD_HDR;
         int got = 1;
-        while (got < ROAD_PKT_LEN) {
-            int r = ::read(fd_, pkt + got, ROAD_PKT_LEN - got);
+        while (got < RD_PKT) {
+            int r = ::read(fd_, pkt + got, RD_PKT - got);
             if (r > 0) got += r;
         }
 
-        /* Validate footer */
-        if (pkt[ROAD_PKT_LEN-1] != ROAD_PKT_FTR) continue;
+        uint16_t dist_mm;
+        uint32_t ts;
+        if (!parse(pkt, dist_mm, ts)) continue;
 
-        RawScanPoint raw;
-        if (!parse_packet(pkt, raw)) continue;
-
-        pkts++;
-        if (!q_push(raw)) {
-            /* Queue day: bo diem cu nhat */
-            RawScanPoint dummy;
-            q_pop(dummy);
-            q_push(raw);
+        PktQ item{ dist_mm, ts };
+        if (!qpush(item)) {
+            /* Neu queue day, pop diem cu nhat de ghi de */
+            PktQ dummy;
+            qpop(dummy);
+            qpush(item);
         }
     }
-    printf("[Road Reader] stopped pkts=%u\n", pkts);
+    printf("[Road Reader] Đã dừng\n");
 }
 
 /* ============================================================
- * BO LOC EMA
- * Tra ve dist (m) da duoc loc nhieu
- *
- * angle_bin: index 0..N_ANGLE_BINS-1 tuong ung -180..+180 do
- * dist_m:    gia tri moi nhat (m)
- *
- * EMA: y[n] = alpha*x[n] + (1-alpha)*y[n-1]
- * Voi alpha = EMA_ALPHA = 0.15
- * -> Rung phuoc 5-15Hz bi loc manh, mat duong thay doi cham van theo kip
- * ============================================================ */
-int RoadScanner::angle_to_bin(float angle_deg) {
-    /* Chuyen -180..+180 sang index 0..359 */
-    int bin = (int)(angle_deg + 180.0f) % N_ANGLE_BINS;
-    if (bin < 0) bin += N_ANGLE_BINS;
-    return bin;
-}
-
-float RoadScanner::apply_ema(int bin, float dist_m) {
-    if (!ema_init_[bin]) {
-        /* Lan dau: khoi tao bang gia tri hien tai */
-        ema_dist_[bin] = dist_m;
-        ema_init_[bin] = true;
-        return dist_m;
-    }
-    /* EMA update */
-    ema_dist_[bin] = EMA_ALPHA * dist_m + (1.0f - EMA_ALPHA) * ema_dist_[bin];
-    return ema_dist_[bin];
-}
-
-/* ============================================================
- * TINH HINH HOC: tu (angle, dist) -> (wx, wy, h_road)
- *
- * He toa do:
- *   - Goc toa do: tam xe, mat dat
- *   - X: sang phai, Y: phia truoc, Z: len tren
- *
- * LiDAR dat tai (LIDAR_OFFSET_X, LIDAR_OFFSET_Y, H_MOUNT)
- * Tia laser chui xuong voi:
- *   - pitch_total = PITCH_STATIC + pitch_from_suspension
- *   - goc quet ngang = angle_deg (tu encoder)
- *
- * Diem chiem tia laser:
- *   Trong he toa do LiDAR:
- *     lx = dist * cos(pitch) * sin(scan)
- *     ly = dist * cos(pitch) * cos(scan)
- *     lz = -dist * sin(pitch)       <- am vi chui xuong
- *
- *   Chuyen sang he toa do xe (tinh goc pitch):
- *     wx = lx + LIDAR_OFFSET_X
- *     wy = ly * cos(pitch) - lz * sin(pitch) + LIDAR_OFFSET_Y
- *     wz = ly * sin(pitch) + lz * cos(pitch) + H_MOUNT
- *
- *   h_road = wz (chieu cao diem chiem so voi mat dat)
- *   Mat duong phang: h_road ~ 0
- *   O ga: h_road < 0 (am, trong long o)
- *   Vat can: h_road > 0 va > OBSTACLE_HEIGHT_THRESH
- * ============================================================ */
-RoadPoint RoadScanner::compute_road_point(const RawScanPoint& raw) {
-    RoadPoint rp{};
-    rp.ts_ms = raw.ts_ms;
-
-    /* Dist hop le? */
-    float dist_m = raw.dist_mm / 1000.0f;
-    if (raw.dist_mm == 0xFFFF ||
-        dist_m < DIST_MIN_VALID ||
-        dist_m > DIST_MAX_VALID) {
-        rp.h_road = H_MOUNT; /* khong co thong tin, coi la phang */
-        return rp;
-    }
-
-    /* Tong goc pitch (goc chui xuong):
-     * = goc co dinh + goc them do phuoc nen */
-    float pitch = PITCH_STATIC_RAD + susp_.pitch_add_rad;
-
-    /* Goc quet ngang (rad) */
-    float scan_rad = raw.angle_deg * (float)M_PI / 180.0f;
-
-    /* ----- Tinh toa do diem chiem trong he LiDAR -----
-     * LiDAR huong xuong duoi goc pitch:
-     *   - Truc Z LiDAR: chui xuong
-     *   - Truc Y LiDAR: phia truoc xe (sau khi xoay pitch)
-     *   - Truc X LiDAR: sang phai (khong doi voi pitch)
-     */
-    float cos_pitch = cosf(pitch);
-    float sin_pitch = sinf(pitch);
-    float cos_scan  = cosf(scan_rad);
-    float sin_scan  = sinf(scan_rad);
-
-    /* Toa do trong he LiDAR (truoc khi chuyen sang he xe) */
-    float lx =  dist_m * cos_pitch * sin_scan;
-    float ly =  dist_m * cos_pitch * cos_scan;
-    float lz = -dist_m * sin_pitch;  /* am vi tia chiu xuong */
-
-    /* Chuyen sang he toa do xe (xoay nguoc pitch quanh truc X) */
-    float wx_world =  lx + LIDAR_OFFSET_X;
-    float wy_world =  ly * cos_pitch - lz * sin_pitch + LIDAR_OFFSET_Y;
-    float wz_world =  ly * sin_pitch + lz * cos_pitch + H_MOUNT;
-
-    rp.wx     = wx_world;
-    rp.wy     = wy_world;
-    rp.h_road = wz_world;
-    rp.h_delta = wz_world; /* ~ 0 neu mat phang, am = o ga, duong = vat can */
-
-    /* Phan loai
-     * h_delta am: diem thap hon mat duong -> o ga
-     * h_delta duong lon: diem cao hon mat duong -> vat can  */
-    rp.is_pothole  = (rp.h_delta < -POTHOLE_DEPTH_THRESH);
-    rp.is_obstacle = (rp.h_delta >  OBSTACLE_HEIGHT_THRESH);
-
-    return rp;
-}
-
-/* ============================================================
- * CAP NHAT ROAD GRID
- *
- * Grid luu uint8_t:
- *   128       = mat phang (gia tri trung tinh)
- *   < 128     = o ga (cang thap = cang sau)
- *   > 128     = vat can (cang cao = cang ngo)
- *   0         = chua biet / out of range
- *
- * Map: val = 128 + clamp(h_delta * 100, -127, 127)
- *   -> 5cm o ga = 128 - 5 = 123
- *   -> 5cm vat can = 128 + 5 = 133
- *   -> 20cm o ga = 128 - 20 = 108
- * ============================================================ */
-void RoadScanner::update_grid(const RoadPoint& rp) {
-    /* Chuyen toa do the gioi sang grid index */
-    int gx = ROAD_OX + (int)(rp.wx / ROAD_CELL_M);
-    int gy = ROAD_OY + (int)(rp.wy / ROAD_CELL_M);
-
-    if (gx < 0 || gx >= ROAD_GRID_N) return;
-    if (gy < 0 || gy >= ROAD_GRID_N) return;
-
-    /* Map h_delta (m) -> uint8 */
-    int val = 128 + (int)(rp.h_delta * 100.0f);
-    if (val < 1)   val = 1;   /* toi thieu 1 (da co thong tin) */
-    if (val > 255) val = 255;
-
-    /* Ghi atomic */
-    __atomic_store_n(&road_grid[gy * ROAD_GRID_N + gx],
-                     (uint8_t)val, __ATOMIC_RELAXED);
-}
-
-/* ============================================================
- * THREAD 2: PROCESS LOOP
- * Pop tu queue -> EMA -> hinh hoc -> confirm -> grid -> callback
+ * THREAD 2: PROCESS (Xử lý lọc nhiễu, hình học và sự kiện)
  * ============================================================ */
 void RoadScanner::process_loop() {
-    printf("[Road Proc] started\n"); fflush(stdout);
+    printf("[Road Proc] Đã khởi chạy\n"); fflush(stdout);
 
-    /* Khoi tao EMA va confirm buffers */
-    for (int i = 0; i < N_ANGLE_BINS; i++) {
-        ema_dist_[i]        = 0.0f;
-        ema_init_[i]        = false;
-        pothole_confirm_[i] = 0;
-        obstacle_confirm_[i]= 0;
-    }
+    ema_init_ = false;
+    baseline_n_ = 0;
+    pothole_confirm_ = 0;
+    obstacle_confirm_ = 0;
 
     using namespace std::chrono_literals;
 
     while (running_.load(std::memory_order_relaxed)) {
-        RawScanPoint raw;
-        if (!q_pop(raw)) {
-            std::this_thread::sleep_for(200us);
+        PktQ p;
+        if (!qpop(p)) {
+            std::this_thread::sleep_for(1ms);
             continue;
         }
 
-        /* --- Buoc 1: Bo loc EMA ---
-         * Giam nhieu rung phuoc truoc khi xu ly hinh hoc */
-        int   bin    = angle_to_bin(raw.angle_deg);
-        float dist_m = raw.dist_mm == 0xFFFF
-                       ? DIST_MAX_VALID          /* invalid: dung max */
-                       : raw.dist_mm / 1000.0f;
-        float dist_filtered = apply_ema(bin, dist_m);
+        pts_.fetch_add(1, std::memory_order_relaxed);
+        
+        float dist_raw_m = p.dist_mm / 1000.0f;
+        last_dist_.store(p.dist_mm, std::memory_order_relaxed);
 
-        /* Tao raw point da loc */
-        RawScanPoint raw_filt = raw;
-        raw_filt.dist_mm = (dist_filtered >= DIST_MAX_VALID)
-                           ? 0xFFFF
-                           : (uint16_t)(dist_filtered * 1000.0f);
-
-        /* --- Buoc 2: Tinh hinh hoc --- */
-        RoadPoint rp = compute_road_point(raw_filt);
-        point_cnt_.fetch_add(1, std::memory_order_relaxed);
-
-        /* --- Buoc 3: Confirm logic ---
-         * Chi bao cao su kien neu N_CONFIRM mau lien tiep cung phat hien
-         * Muc dich: loai bo nhieu xung don le (rung manh 1 frame) */
-        if (rp.is_pothole) {
-            pothole_confirm_[bin]++;
-            obstacle_confirm_[bin] = 0;
-            if (pothole_confirm_[bin] == N_CONFIRM) {
-                /* Xac nhan o ga */
-                pothole_cnt_.fetch_add(1, std::memory_order_relaxed);
-                if (cb_pothole_) cb_pothole_(rp);
-            }
-        } else if (rp.is_obstacle) {
-            obstacle_confirm_[bin]++;
-            pothole_confirm_[bin] = 0;
-            if (obstacle_confirm_[bin] == N_CONFIRM) {
-                obstacle_cnt_.fetch_add(1, std::memory_order_relaxed);
-                if (cb_obstacle_) cb_obstacle_(rp);
-            }
-        } else {
-            /* Mat phang: reset confirm counters */
-            pothole_confirm_[bin]  = 0;
-            obstacle_confirm_[bin] = 0;
+        /* Kiem tra tin hieu nhieu/out-of-range */
+        if (p.dist_mm == 0xFFFF || dist_raw_m < DIST_MIN_M || dist_raw_m > DIST_MAX_M) {
+            pothole_confirm_ = 0;
+            obstacle_confirm_ = 0;
+            continue;
         }
 
-        /* --- Buoc 4: Cap nhat road grid --- */
-        update_grid(rp);
+        /* 1. KHOI TAO & LOC EMA */
+        if (!ema_init_) {
+            ema_dist_ = dist_raw_m;
+            ema_init_ = true;
+        }
+        ema_dist_ = (EMA_ALPHA * dist_raw_m) + ((1.0f - EMA_ALPHA) * ema_dist_);
+
+        /* 2. HOC BASELINE - Bo qua phat hien o nhung mau dau tien de on dinh */
+        if (baseline_n_ < N_BASELINE) {
+            baseline_n_++;
+            continue; 
+        }
+
+        /* 3. TINH TOAN HINH HOC & BU PHUOC
+         * expected_dist: khoang cach can co de tia cham mat duong PHANG
+         * delta_m: expected_dist - ema_dist_
+         * - Am: do xa hon du kien (tia xuyen xuong lo) -> O GA
+         * - Duong: do gan hon du kien (tia bi chan som) -> VAT CAN
+         */
+        float pitch_tot = PITCH_STATIC_RAD + get_pitch_dynamic();
+        float dist_exp = expected_dist(pitch_tot);
+        float delta = dist_exp - ema_dist_;
+
+        /* Cap nhat thuoc tinh last_delta de web/API lay nhanh */
+        uint32_t delta_u32;
+        std::memcpy(&delta_u32, &delta, sizeof(delta));
+        last_delta_raw_.store(delta_u32, std::memory_order_relaxed);
+
+        RoadSample sample{};
+        sample.ts_ms = p.ts;
+        sample.dist_raw_m = dist_raw_m;
+        sample.dist_ema_m = ema_dist_;
+        sample.dist_expect_m = dist_exp;
+        sample.delta_m = delta;
+        sample.is_valid = true;
+        sample.is_pothole = false;
+        sample.is_obstacle = false;
+
+        /* 4. LOGIC XAC NHAN SU KIEN (CONFIRMATION) */
+        if (delta < -POTHOLE_THRESH_M) {
+            pothole_confirm_++;
+            obstacle_confirm_ = 0;
+            if (pothole_confirm_ >= N_CONFIRM) {
+                sample.is_pothole = true;
+                npot_.fetch_add(1, std::memory_order_relaxed);
+                
+                if (cb_pot_) cb_pot_(sample);
+
+                /* Luu su kien O ga */
+                PotholeEvent pe;
+                pe.ts_ms = p.ts;
+                pe.depth_m = -delta; /* chuyen gia tri am thanh do sau duong */
+                /* Tam chieu: cach dau xe bao xa */
+                pe.x_ahead_m = (ema_dist_ * cosf(pitch_tot)) + LIDAR_OY;
+
+                {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    potholes_.push_back(pe);
+                    if (potholes_.size() > 50) potholes_.erase(potholes_.begin());
+                }
+            }
+        } else if (delta > OBSTACLE_THRESH_M) {
+            obstacle_confirm_++;
+            pothole_confirm_ = 0;
+            if (obstacle_confirm_ >= N_CONFIRM) {
+                sample.is_obstacle = true;
+                nobs_.fetch_add(1, std::memory_order_relaxed);
+                
+                if (cb_obs_) cb_obs_(sample);
+            }
+        } else {
+            /* Quay ve mat phang */
+            pothole_confirm_ = 0;
+            obstacle_confirm_ = 0;
+        }
+
+        /* 5. GHI VAO TIMELINE DE VE BIEU DO GUI LEN WEB/UI */
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            timeline_.push_back(sample);
+            if (timeline_.size() > TIMELINE_LEN) {
+                timeline_.pop_front();
+            }
+        }
     }
-    printf("[Road Proc] stopped pts=%u pot=%u obs=%u\n",
-           point_cnt_.load(), pothole_cnt_.load(), obstacle_cnt_.load());
+    printf("[Road Proc] Đã dừng. Tổng điểm: %u\n", pts_.load());
 }
 
 /* ============================================================
- * START / STOP
+ * QUAN LY VONG DOI (START / STOP)
  * ============================================================ */
 void RoadScanner::start() {
     if (!uart_open()) return;
-    memset(road_grid, 0, sizeof(road_grid));
+    
+    pts_.store(0);
+    npot_.store(0);
+    nobs_.store(0);
+    qh_.store(0);
+    qt_.store(0);
     running_.store(true);
-    thr_reader_ = std::thread(&RoadScanner::reader_loop,  this);
-    thr_proc_   = std::thread(&RoadScanner::process_loop, this);
+    
+    thr_r_ = std::thread(&RoadScanner::reader_loop, this);
+    thr_p_ = std::thread(&RoadScanner::process_loop, this);
 }
 
 void RoadScanner::stop() {
     running_.store(false);
-    uart_close();  /* unblock read() */
-    if (thr_reader_.joinable()) thr_reader_.join();
-    if (thr_proc_.joinable())   thr_proc_.join();
+    uart_close();  /* Giai phong tap tin de ngat block::read */
+    
+    if (thr_r_.joinable()) thr_r_.join();
+    if (thr_p_.joinable()) thr_p_.join();
 }
