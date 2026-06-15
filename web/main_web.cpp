@@ -668,8 +668,6 @@ static void handle_client(int client_fd) {
             lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
             for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
             for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
-
-
         }
 
         /* Su dung std::string de cap phat bo nho dong an toan */
@@ -801,7 +799,7 @@ int main(int argc, char** argv) {
 
         // Cùng giới hạn vùng quan tâm phía trước xe như on_obstacle, để 2 loại
         // sự kiện đối xứng nhau trên bản đồ/badge.
-        if (wy > 0.5f && wy < 1.75f) {
+        if (wy > 1.0f && wy < 3.0f) {
             g_road_event.update(wy, RoadEventType::POTHOLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10);
         }
@@ -818,7 +816,7 @@ int main(int argc, char** argv) {
         float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
         // Đánh dấu lên map (hàm này chạy rất nhẹ, không lo tràn bộ nhớ)
-        if (wy > 0.5f && wy < 1.75f) {
+        if (wy > 1.0f && wy < 3.0f) {
             g_road_event.update(wy, RoadEventType::OBSTACLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11);
         } else {
