@@ -166,9 +166,9 @@ void RoadScanner::process_loop() {
         ema_dist_ = (EMA_ALPHA * dist_raw_m) + ((1.0f - EMA_ALPHA) * ema_dist_);
 
         /* 2. HOC BASELINE - Bo qua phat hien o nhung mau dau tien de on dinh
-         * Dong thoi tu calib goc chui: trung binh ema_dist_ trong giai doan
+         * Dong thoi tu calib goc nghieng: trung binh ema_dist_ trong giai doan
          * nay duoc coi la "mat duong phang" thuc te (xe phai dung tren mat
-         * phang khi khoi dong), tu do tinh nguoc goc chui thuc te thay cho
+         * phang khi khoi dong), tu do tinh nguoc goc nghieng thuc te thay cho
          * PITCH_STATIC_RAD (gia tri thiet ke, thuong khong khop lap dat). */
         if (baseline_n_ < N_BASELINE) {
             baseline_sum_ += ema_dist_;

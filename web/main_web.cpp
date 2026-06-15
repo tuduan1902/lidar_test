@@ -487,7 +487,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   <div id="info">
     <span class="badge" id="l0">L0: --</span>
     <span class="badge" id="l1">L1: --</span>
-    <span class="badge" id="lidar-chui"><span id="lidar-chui-label">LiDAR chúi</span>: <span id="lidar-chui-dist">--</span></span>
+    <span class="badge" id="lidar-nghieng"><span id="lidar-nghieng-label">LiDAR nghiêng</span>: <span id="lidar-nghieng-dist">--</span></span>
     <span class="badge" id="u1">US1: --</span>
     <span class="badge" id="u2">US2: --</span>
     <span class="badge" id="u3">US3: --</span>
@@ -572,13 +572,13 @@ async function fetchData() {
       document.getElementById(id).textContent = `US${i+1}: ${uf(d['us'+i])}`;
     });
 
-    // Cập nhật khoảng cách LiDAR chúi (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
-    const lcType  = d.lidar_chui_type || 0;
-    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR chúi');
-    const lcDist  = (d.lidar_chui_y >= 0) ? d.lidar_chui_y.toFixed(2) + " m" : "--";
-    document.getElementById('lidar-chui-label').textContent = lcLabel;
-    document.getElementById('lidar-chui-dist').innerText = lcDist;
-    document.getElementById('lidar-chui').className =
+    // Cập nhật khoảng cách LiDAR nghiêng (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
+    const lcType  = d.lidar_nghieng_type || 0;
+    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR nghiêng');
+    const lcDist  = (d.lidar_nghieng_y >= 0) ? d.lidar_nghieng_y.toFixed(2) + " m" : "--";
+    document.getElementById('lidar-nghieng-label').textContent = lcLabel;
+    document.getElementById('lidar-nghieng-dist').innerText = lcDist;
+    document.getElementById('lidar-nghieng').className =
       'badge ' + (lcType === 1 ? 'pothole' : (lcType === 2 ? 'warn' : ''));
 
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
@@ -610,8 +610,8 @@ struct WebState {
     uint8_t             sources[GRID_N * GRID_N];
     uint32_t            lidar_pts = 0;
     uint32_t            us_pts    = 0;
-    float               lidar_chui_y    = -1.0f; /* -1 = chua co su kien / da cu */
-    int                 lidar_chui_type = 0;      /* 0=none, 1=pothole, 2=obstacle */
+    float               lidar_nghieng_y    = -1.0f; /* -1 = chua co su kien / da cu */
+    int                 lidar_nghieng_type = 0;      /* 0=none, 1=pothole, 2=obstacle */
     float               hz        = 0;
     uint16_t            l_mm [2]  = {0xFFFF, 0xFFFF};
     int32_t             l_a10[2]  = {0, 0};
@@ -629,8 +629,8 @@ static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) 
     g_web.lidar_pts = mgr.lidar_pts();
     {
         auto [y, type] = g_road_event.snapshot();
-        g_web.lidar_chui_y    = y;
-        g_web.lidar_chui_type = (int)type;
+        g_web.lidar_nghieng_y    = y;
+        g_web.lidar_nghieng_type = (int)type;
     }
     g_web.us_pts    = mgr.us_pts();
     g_web.hz        = hz;
@@ -663,8 +663,8 @@ static void handle_client(int client_fd) {
             memcpy(cells,   g_web.cells,   sizeof(cells));
             memcpy(sources, g_web.sources, sizeof(sources));
 
-            lc_y    = g_web.lidar_chui_y;
-            lc_type = g_web.lidar_chui_type;
+            lc_y    = g_web.lidar_nghieng_y;
+            lc_type = g_web.lidar_nghieng_type;
             lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
             for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
             for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
@@ -690,8 +690,8 @@ static void handle_client(int client_fd) {
         body += "\"us1\":" + std::to_string(ucm[1]) + ",";
         body += "\"us2\":" + std::to_string(ucm[2]) + ",";
         body += "\"us3\":" + std::to_string(ucm[3]) + ",";
-        body += "\"lidar_chui_y\":" + std::to_string(lc_y) + ",";
-        body += "\"lidar_chui_type\":" + std::to_string(lc_type) + ",";
+        body += "\"lidar_nghieng_y\":" + std::to_string(lc_y) + ",";
+        body += "\"lidar_nghieng_type\":" + std::to_string(lc_type) + ",";
 
         // 2. Nối mảng cells
         body += "\"cells\":[";
@@ -761,7 +761,7 @@ static void http_server_thread() {
 }
 
 /* ============================================================
- * MAIN (Hỗ trợ Đánh chặn LiDAR Đuôi làm LiDAR Chúi quét ổ gà)
+ * MAIN (Hỗ trợ Đánh chặn LiDAR Đuôi làm LiDAR Nghiêng quét ổ gà)
  * ============================================================ */
 int main(int argc, char** argv) {
     std::signal(SIGINT,  on_sig);
@@ -792,8 +792,8 @@ int main(int argc, char** argv) {
         // Với 1 tia cố định, tọa độ X (ngang) luôn bằng 0 (nằm giữa đầu xe).
         float wx = 0.0f;
 
-        // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_chui) + khoảng_cách_gắn_lidar.
-        // Dùng góc chúi đã TỰ CALIB (baseline_pitch_rad) thay cho PITCH_STATIC_RAD
+        // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_nghieng) + khoảng_cách_gắn_lidar.
+        // Dùng góc nghiêng đã TỰ CALIB (baseline_pitch_rad) thay cho PITCH_STATIC_RAD
         // thiết kế, để khớp với góc mà road_scanner đang dùng để tính delta.
         float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
@@ -811,7 +811,7 @@ int main(int argc, char** argv) {
         static auto last_trigger = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
 
-        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa), dùng góc chúi tự calib
+        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa), dùng góc nghiêng tự calib
         float wx = 0.0f;
         float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
@@ -825,7 +825,7 @@ int main(int argc, char** argv) {
 
         // RATE-LIMIT: Chỉ cho phép in log tối đa 5 lần/giây (mỗi 200ms)
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= 200) {
-            printf("[LiDAR Chúi] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
+            printf("[LiDAR Nghiêng] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
             last_trigger = now; // Cập nhật lại mốc thời gian
         }
 

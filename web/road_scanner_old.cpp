@@ -130,6 +130,10 @@ void RoadScanner::process_loop() {
 
     ema_init_ = false;
     baseline_n_ = 0;
+    baseline_sum_ = 0.0;
+    baseline_dist_ = 0.0f;
+    baseline_pitch_rad_ = PITCH_STATIC_RAD; /* fallback truoc khi calib xong */
+    calibrated_.store(false, std::memory_order_relaxed);
     pothole_confirm_ = 0;
     obstacle_confirm_ = 0;
 
@@ -161,10 +165,50 @@ void RoadScanner::process_loop() {
         }
         ema_dist_ = (EMA_ALPHA * dist_raw_m) + ((1.0f - EMA_ALPHA) * ema_dist_);
 
-        /* 2. HOC BASELINE - Bo qua phat hien o nhung mau dau tien de on dinh */
+        /* 2. HOC BASELINE - Bo qua phat hien o nhung mau dau tien de on dinh
+         * Dong thoi tu calib goc nghieng: trung binh ema_dist_ trong giai doan
+         * nay duoc coi la "mat duong phang" thuc te (xe phai dung tren mat
+         * phang khi khoi dong), tu do tinh nguoc goc nghieng thuc te thay cho
+         * PITCH_STATIC_RAD (gia tri thiet ke, thuong khong khop lap dat). */
         if (baseline_n_ < N_BASELINE) {
+            baseline_sum_ += ema_dist_;
             baseline_n_++;
-            continue; 
+
+            if (baseline_n_ == N_BASELINE) {
+                baseline_dist_ = (float)(baseline_sum_ / N_BASELINE);
+
+                float ratio = H_MOUNT / baseline_dist_;
+                if (ratio > 1.0f) ratio = 1.0f;
+                if (ratio < -1.0f) ratio = -1.0f;
+                float pitch = asinf(ratio);
+                if (pitch < PITCH_MIN_RAD) pitch = PITCH_MIN_RAD;
+                if (pitch > PITCH_MAX_RAD) pitch = PITCH_MAX_RAD;
+                baseline_pitch_rad_ = pitch;
+
+                uint32_t bd_u32, bp_u32;
+                std::memcpy(&bd_u32, &baseline_dist_, sizeof(baseline_dist_));
+                std::memcpy(&bp_u32, &baseline_pitch_rad_, sizeof(baseline_pitch_rad_));
+                baseline_dist_raw_.store(bd_u32, std::memory_order_relaxed);
+                baseline_pitch_raw_.store(bp_u32, std::memory_order_relaxed);
+                calibrated_.store(true, std::memory_order_relaxed);
+
+                printf("[Road Proc] Tu calib xong: baseline_dist=%.3f m, "
+                       "pitch=%.2f deg (thiet ke: SLANT_RANGE_REF=%.2f m, "
+                       "pitch=%.2f deg)\n",
+                       baseline_dist_, baseline_pitch_rad_ * (180.0f / 3.14159265f),
+                       SLANT_RANGE_REF, PITCH_STATIC_RAD * (180.0f / 3.14159265f));
+                fflush(stdout);
+
+                if (fabsf(baseline_dist_ - SLANT_RANGE_REF) > 0.3f) {
+                    printf("[Road Proc] CANH BAO: baseline_dist (%.3f m) lech "
+                           "nhieu so voi SLANT_RANGE_REF thiet ke (%.2f m). "
+                           "Kiem tra lai goc/do cao lap dat LiDAR, hoac dam "
+                           "bao xe dang dung tren mat duong PHANG luc khoi dong.\n",
+                           baseline_dist_, SLANT_RANGE_REF);
+                    fflush(stdout);
+                }
+            }
+            continue;
         }
 
         /* 3. TINH TOAN HINH HOC & BU PHUOC
@@ -172,8 +216,14 @@ void RoadScanner::process_loop() {
          * delta_m: expected_dist - ema_dist_
          * - Am: do xa hon du kien (tia xuyen xuong lo) -> O GA
          * - Duong: do gan hon du kien (tia bi chan som) -> VAT CAN
+         *
+         * baseline_pitch_rad_ duoc tu calib tu N_BASELINE mau dau (xem o tren),
+         * thay cho PITCH_STATIC_RAD (gia tri thiet ke). Nho vay tai dung diem
+         * baseline (mat duong phang luc khoi dong, phuoc khong nen), delta = 0
+         * mot cach tu nhien, khong phu thuoc viec do dac H_MOUNT/SLANT_RANGE_REF
+         * co chinh xac voi thuc te lap dat hay khong.
          */
-        float pitch_tot = PITCH_STATIC_RAD + get_pitch_dynamic();
+        float pitch_tot = baseline_pitch_rad_ + get_pitch_dynamic();
         float dist_exp = expected_dist(pitch_tot);
         float delta = dist_exp - ema_dist_;
 
