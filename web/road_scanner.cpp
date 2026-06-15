@@ -131,15 +131,36 @@ void RoadScanner::process_loop() {
     ema_init_ = false;
     baseline_n_ = 0;
     baseline_sum_ = 0.0;
+    baseline_min_ = 0.0f;
+    baseline_max_ = 0.0f;
+    baseline_retries_ = 0;
     baseline_dist_ = 0.0f;
     baseline_pitch_rad_ = PITCH_STATIC_RAD; /* fallback truoc khi calib xong */
     calibrated_.store(false, std::memory_order_relaxed);
+    calib_fallback_.store(false, std::memory_order_relaxed);
+    recalib_request_.store(false, std::memory_order_relaxed);
     pothole_confirm_ = 0;
     obstacle_confirm_ = 0;
 
     using namespace std::chrono_literals;
 
     while (running_.load(std::memory_order_relaxed)) {
+        /* Yeu cau tinh lai baseline (vd nguoi van hanh goi sau khi dua xe
+         * ve cho phang). Reset toan bo trang thai calib, vong lap baseline
+         * se chay lai tu dau. */
+        if (recalib_request_.exchange(false, std::memory_order_relaxed)) {
+            printf("[Road Proc] Yeu cau tinh lai baseline -> reset calib, hoc lai tu dau.\n");
+            fflush(stdout);
+            ema_init_ = false;
+            baseline_n_ = 0;
+            baseline_sum_ = 0.0;
+            baseline_retries_ = 0;
+            calibrated_.store(false, std::memory_order_relaxed);
+            calib_fallback_.store(false, std::memory_order_relaxed);
+            pothole_confirm_ = 0;
+            obstacle_confirm_ = 0;
+        }
+
         PktQ p;
         if (!qpop(p)) {
             std::this_thread::sleep_for(1ms);
@@ -169,21 +190,79 @@ void RoadScanner::process_loop() {
          * Dong thoi tu calib goc nghieng: trung binh ema_dist_ trong giai doan
          * nay duoc coi la "mat duong phang" thuc te (xe phai dung tren mat
          * phang khi khoi dong), tu do tinh nguoc goc nghieng thuc te thay cho
-         * PITCH_STATIC_RAD (gia tri thiet ke, thuong khong khop lap dat). */
+         * PITCH_STATIC_RAD (gia tri thiet ke, thuong khong khop lap dat).
+         *
+         * CONG ON DINH: neu (max-min) trong cua so vuot BASELINE_STABILITY_M
+         * (vd co vat/o ga ngay duoi LiDAR luc khoi dong), KHONG chot calib -
+         * reset va thu cua so ke tiep, toi da BASELINE_MAX_RETRIES lan. Het
+         * luot ma van khong on dinh -> fallback dung PITCH_STATIC_RAD. */
         if (baseline_n_ < N_BASELINE) {
+            if (baseline_n_ == 0) {
+                baseline_sum_ = 0.0;
+                baseline_min_ = ema_dist_;
+                baseline_max_ = ema_dist_;
+            }
             baseline_sum_ += ema_dist_;
+            if (ema_dist_ < baseline_min_) baseline_min_ = ema_dist_;
+            if (ema_dist_ > baseline_max_) baseline_max_ = ema_dist_;
             baseline_n_++;
 
             if (baseline_n_ == N_BASELINE) {
-                baseline_dist_ = (float)(baseline_sum_ / N_BASELINE);
+                float spread = baseline_max_ - baseline_min_;
+                bool stable = spread <= BASELINE_STABILITY_M;
 
-                float ratio = H_MOUNT / baseline_dist_;
-                if (ratio > 1.0f) ratio = 1.0f;
-                if (ratio < -1.0f) ratio = -1.0f;
-                float pitch = asinf(ratio);
-                if (pitch < PITCH_MIN_RAD) pitch = PITCH_MIN_RAD;
-                if (pitch > PITCH_MAX_RAD) pitch = PITCH_MAX_RAD;
-                baseline_pitch_rad_ = pitch;
+                if (!stable && baseline_retries_ < BASELINE_MAX_RETRIES) {
+                    baseline_retries_++;
+                    printf("[Road Proc] Baseline cua so #%d KHONG on dinh "
+                           "(dao dong %.3f m > %.3f m) - co the co vat/o ga "
+                           "ngay duoi LiDAR hoac xe dang di. Thu cua so ke tiep...\n",
+                           baseline_retries_, spread, BASELINE_STABILITY_M);
+                    fflush(stdout);
+                    baseline_n_ = 0; /* thu lai voi cua so moi */
+                    continue;
+                }
+
+                if (!stable) {
+                    /* Het so lan thu - fallback ve gia tri thiet ke, can recalib thu cong */
+                    baseline_dist_      = SLANT_RANGE_REF;
+                    baseline_pitch_rad_ = PITCH_STATIC_RAD;
+                    calib_fallback_.store(true, std::memory_order_relaxed);
+
+                    printf("[Road Proc] CANH BAO: Sau %d lan thu van KHONG tim duoc "
+                           "cua so baseline on dinh (dao dong cuoi = %.3f m). "
+                           "DANG DUNG TAM gia tri THIET KE (SLANT_RANGE_REF=%.2f m, "
+                           "pitch=%.2f deg) - co the SAI nhe so voi lap dat thuc te. "
+                           "Hay dua xe ve mat duong phang va goi request_recalibration().\n",
+                           BASELINE_MAX_RETRIES, spread, SLANT_RANGE_REF,
+                           PITCH_STATIC_RAD * (180.0f / 3.14159265f));
+                    fflush(stdout);
+                } else {
+                    baseline_dist_ = (float)(baseline_sum_ / N_BASELINE);
+
+                    float ratio = H_MOUNT / baseline_dist_;
+                    if (ratio > 1.0f) ratio = 1.0f;
+                    if (ratio < -1.0f) ratio = -1.0f;
+                    float pitch = asinf(ratio);
+                    if (pitch < PITCH_MIN_RAD) pitch = PITCH_MIN_RAD;
+                    if (pitch > PITCH_MAX_RAD) pitch = PITCH_MAX_RAD;
+                    baseline_pitch_rad_ = pitch;
+                    calib_fallback_.store(false, std::memory_order_relaxed);
+
+                    printf("[Road Proc] Tu calib xong (on dinh, dao dong=%.3f m): "
+                           "baseline_dist=%.3f m, pitch=%.2f deg "
+                           "(thiet ke: SLANT_RANGE_REF=%.2f m, pitch=%.2f deg)\n",
+                           spread, baseline_dist_, baseline_pitch_rad_ * (180.0f / 3.14159265f),
+                           SLANT_RANGE_REF, PITCH_STATIC_RAD * (180.0f / 3.14159265f));
+                    fflush(stdout);
+
+                    if (fabsf(baseline_dist_ - SLANT_RANGE_REF) > 0.3f) {
+                        printf("[Road Proc] CANH BAO: baseline_dist (%.3f m) lech "
+                               "nhieu so voi SLANT_RANGE_REF thiet ke (%.2f m). "
+                               "Kiem tra lai goc/do cao lap dat LiDAR thuc te.\n",
+                               baseline_dist_, SLANT_RANGE_REF);
+                        fflush(stdout);
+                    }
+                }
 
                 uint32_t bd_u32, bp_u32;
                 std::memcpy(&bd_u32, &baseline_dist_, sizeof(baseline_dist_));
@@ -191,22 +270,6 @@ void RoadScanner::process_loop() {
                 baseline_dist_raw_.store(bd_u32, std::memory_order_relaxed);
                 baseline_pitch_raw_.store(bp_u32, std::memory_order_relaxed);
                 calibrated_.store(true, std::memory_order_relaxed);
-
-                printf("[Road Proc] Tu calib xong: baseline_dist=%.3f m, "
-                       "pitch=%.2f deg (thiet ke: SLANT_RANGE_REF=%.2f m, "
-                       "pitch=%.2f deg)\n",
-                       baseline_dist_, baseline_pitch_rad_ * (180.0f / 3.14159265f),
-                       SLANT_RANGE_REF, PITCH_STATIC_RAD * (180.0f / 3.14159265f));
-                fflush(stdout);
-
-                if (fabsf(baseline_dist_ - SLANT_RANGE_REF) > 0.3f) {
-                    printf("[Road Proc] CANH BAO: baseline_dist (%.3f m) lech "
-                           "nhieu so voi SLANT_RANGE_REF thiet ke (%.2f m). "
-                           "Kiem tra lai goc/do cao lap dat LiDAR, hoac dam "
-                           "bao xe dang dung tren mat duong PHANG luc khoi dong.\n",
-                           baseline_dist_, SLANT_RANGE_REF);
-                    fflush(stdout);
-                }
             }
             continue;
         }

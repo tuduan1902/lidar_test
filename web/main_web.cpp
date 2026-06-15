@@ -37,10 +37,19 @@
 static std::atomic<bool> g_quit{false};
 static void on_sig(int) { g_quit.store(true); }
 
+/* SIGUSR1: cho phep nguoi van hanh yeu cau tinh lai baseline goc nghieng
+ * (vd: `kill -USR1 <pid>`) sau khi dua xe ve mat duong PHANG. Con tro
+ * duoc gan trong main() sau khi RoadScanner duoc tao. */
+static std::atomic<RoadScanner*> g_road_scanner_for_signal{nullptr};
+static void on_recalib_sig(int) {
+    RoadScanner* rs = g_road_scanner_for_signal.load(std::memory_order_relaxed);
+    if (rs) rs->request_recalibration();
+}
+
 /* ============================================================
- * RoadScanner event state cho web (LiDAR chui)
+ * RoadScanner event state cho web (LiDAR nghieng)
  * ------------------------------------------------------------
- * Truoc day chi co 1 bien g_lidar_chui_y atomic<float>, chi duoc
+ * Truoc day chi co 1 bien g_lidar_nghieng_y atomic<float>, chi duoc
  * on_obstacle ghi -> badge va cham mau tren canvas (do on_pothole
  * khong gioi han wy, on_obstacle co gioi han 0.5<wy<1.75) co the
  * lech pha nhau, va gia tri cu khong bao gio bi xoa nen badge hien
@@ -487,11 +496,12 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   <div id="info">
     <span class="badge" id="l0">L0: --</span>
     <span class="badge" id="l1">L1: --</span>
-    <span class="badge" id="lidar-nghieng"><span id="lidar-nghieng-label">LiDAR nghiêng</span>: <span id="lidar-nghieng-dist">--</span></span>
+    <span class="badge" id="lidar-nghieng"><span id="lidar-nghieng-label">LiDAR nghieng</span>: <span id="lidar-nghieng-dist">--</span></span>
     <span class="badge" id="u1">US1: --</span>
     <span class="badge" id="u2">US2: --</span>
     <span class="badge" id="u3">US3: --</span>
     <span class="badge" id="u4">US4: --</span>
+    <span class="badge" id="calib-badge">Calib: --</span>
     <span class="badge" id="fps">-- pts/s</span>
   </div>
 </div>
@@ -572,14 +582,27 @@ async function fetchData() {
       document.getElementById(id).textContent = `US${i+1}: ${uf(d['us'+i])}`;
     });
 
-    // Cập nhật khoảng cách LiDAR nghiêng (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
+    // Cập nhật khoảng cách LiDAR nghieng (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
     const lcType  = d.lidar_nghieng_type || 0;
-    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR nghiêng');
+    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR nghieng');
     const lcDist  = (d.lidar_nghieng_y >= 0) ? d.lidar_nghieng_y.toFixed(2) + " m" : "--";
     document.getElementById('lidar-nghieng-label').textContent = lcLabel;
     document.getElementById('lidar-nghieng-dist').innerText = lcDist;
     document.getElementById('lidar-nghieng').className =
       'badge ' + (lcType === 1 ? 'pothole' : (lcType === 2 ? 'warn' : ''));
+
+    // Trang thai tu-calib goc nghieng (RoadScanner)
+    const calibEl = document.getElementById('calib-badge');
+    if (!d.road_calibrated) {
+      calibEl.textContent = 'Calib: đang học...';
+      calibEl.className = 'badge warn';
+    } else if (d.road_calib_fallback) {
+      calibEl.textContent = `Calib: FALLBACK (thiết kế, ${d.road_baseline_pitch_deg.toFixed(1)}°) - cần recalib`;
+      calibEl.className = 'badge warn';
+    } else {
+      calibEl.textContent = `Calib: OK (${d.road_baseline_dist.toFixed(2)}m, ${d.road_baseline_pitch_deg.toFixed(1)}°)`;
+      calibEl.className = 'badge ok';
+    }
 
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
 
@@ -616,12 +639,17 @@ struct WebState {
     uint16_t            l_mm [2]  = {0xFFFF, 0xFFFF};
     int32_t             l_a10[2]  = {0, 0};
     float               us_cm[4]  = {-1,-1,-1,-1};
+
+    /* Trang thai tu-calib goc nghieng (RoadScanner) */
+    bool                road_calibrated = false;
+    bool                road_calib_fallback = false;
+    float               road_baseline_dist_m = 0.0f;
+    float               road_baseline_pitch_deg = 0.0f;
 };
 static WebState g_web;
 
 /* Cap nhat WebState tu main loop */
 static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) {
-    (void)rs; // chua dung truc tiep: du lieu RoadScanner di qua g_road_event (xem on_pothole/on_obstacle)
     std::lock_guard<std::mutex> lk(g_web.mtx);
     mgr.snapshot(g_web.cells, g_web.sources);
     
@@ -639,6 +667,11 @@ static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs, float hz) 
         g_web.l_a10[i] = mgr.last_lidar_angle_tenths(i);
     }
     for (int i=0;i<4;i++) g_web.us_cm[i] = mgr.last_us_cm(i);
+
+    g_web.road_calibrated         = rs.is_calibrated();
+    g_web.road_calib_fallback     = rs.calib_is_fallback();
+    g_web.road_baseline_dist_m    = rs.baseline_dist_m();
+    g_web.road_baseline_pitch_deg = rs.baseline_pitch_deg();
 }
 
 /* Xu ly 1 HTTP connection */
@@ -658,6 +691,8 @@ static void handle_client(int client_fd) {
         float lc_y;  // gia tri Y cua su kien o ga/vat can gan nhat (-1 = khong co/da cu)
         int   lc_type; // 0=none, 1=pothole, 2=obstacle
         uint16_t lmm[2]; int32_t la10[2]; float ucm[4];
+        bool  road_calib, road_fallback;
+        float road_baseline_dist, road_baseline_pitch;
         {
             std::lock_guard<std::mutex> lk(g_web.mtx);
             memcpy(cells,   g_web.cells,   sizeof(cells));
@@ -668,6 +703,11 @@ static void handle_client(int client_fd) {
             lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
             for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
             for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
+
+            road_calib          = g_web.road_calibrated;
+            road_fallback       = g_web.road_calib_fallback;
+            road_baseline_dist  = g_web.road_baseline_dist_m;
+            road_baseline_pitch = g_web.road_baseline_pitch_deg;
         }
 
         /* Su dung std::string de cap phat bo nho dong an toan */
@@ -692,6 +732,10 @@ static void handle_client(int client_fd) {
         body += "\"us3\":" + std::to_string(ucm[3]) + ",";
         body += "\"lidar_nghieng_y\":" + std::to_string(lc_y) + ",";
         body += "\"lidar_nghieng_type\":" + std::to_string(lc_type) + ",";
+        body += "\"road_calibrated\":" + std::string(road_calib ? "true" : "false") + ",";
+        body += "\"road_calib_fallback\":" + std::string(road_fallback ? "true" : "false") + ",";
+        body += "\"road_baseline_dist\":" + std::to_string(road_baseline_dist) + ",";
+        body += "\"road_baseline_pitch_deg\":" + std::to_string(road_baseline_pitch) + ",";
 
         // 2. Nối mảng cells
         body += "\"cells\":[";
@@ -761,7 +805,7 @@ static void http_server_thread() {
 }
 
 /* ============================================================
- * MAIN (Hỗ trợ Đánh chặn LiDAR Đuôi làm LiDAR Nghiêng quét ổ gà)
+ * MAIN (Hỗ trợ Đánh chặn LiDAR Đuôi làm LiDAR Chúi quét ổ gà)
  * ============================================================ */
 int main(int argc, char** argv) {
     std::signal(SIGINT,  on_sig);
@@ -786,6 +830,12 @@ int main(int argc, char** argv) {
     FilteredCombinedManager mgr(lidar_dev, us_dev);
     RoadScanner road_scanner(road_dev, 115200);
 
+    /* Cho phep tinh lai baseline goc nghieng bang `kill -USR1 <pid>` khi xe
+     * dang dung tren mat duong phang (xem RoadScanner::request_recalibration) */
+    g_road_scanner_for_signal.store(&road_scanner, std::memory_order_relaxed);
+    std::signal(SIGUSR1, on_recalib_sig);
+    printf("[Road] PID = %d (gui SIGUSR1 de tinh lai baseline goc nghieng khi can)\n", (int)getpid());
+
 
     //Callback xử lý ổ gà
     road_scanner.on_pothole([&mgr, &road_scanner](const RoadSample& sample) {
@@ -793,13 +843,13 @@ int main(int argc, char** argv) {
         float wx = 0.0f;
 
         // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_nghieng) + khoảng_cách_gắn_lidar.
-        // Dùng góc nghiêng đã TỰ CALIB (baseline_pitch_rad) thay cho PITCH_STATIC_RAD
+        // Dùng góc nghieng đã TỰ CALIB (baseline_pitch_rad) thay cho PITCH_STATIC_RAD
         // thiết kế, để khớp với góc mà road_scanner đang dùng để tính delta.
         float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
         // Cùng giới hạn vùng quan tâm phía trước xe như on_obstacle, để 2 loại
         // sự kiện đối xứng nhau trên bản đồ/badge.
-        if (wy > 1.0f && wy < 3.0f) {
+        if (wy > 0.5f && wy < 1.75f) {
             g_road_event.update(wy, RoadEventType::POTHOLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10);
         }
@@ -811,12 +861,12 @@ int main(int argc, char** argv) {
         static auto last_trigger = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
 
-        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa), dùng góc nghiêng tự calib
+        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa), dùng góc chúi tự calib
         float wx = 0.0f;
         float wy = (sample.dist_ema_m * cosf(road_scanner.baseline_pitch_rad())) + LIDAR_OY;
 
         // Đánh dấu lên map (hàm này chạy rất nhẹ, không lo tràn bộ nhớ)
-        if (wy > 1.0f && wy < 3.0f) {
+        if (wy > 0.5f && wy < 1.75f) {
             g_road_event.update(wy, RoadEventType::OBSTACLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11);
         } else {
@@ -825,7 +875,7 @@ int main(int argc, char** argv) {
 
         // RATE-LIMIT: Chỉ cho phép in log tối đa 5 lần/giây (mỗi 200ms)
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= 200) {
-            printf("[LiDAR Nghiêng] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
+            printf("[LiDAR Chúi] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
             last_trigger = now; // Cập nhật lại mốc thời gian
         }
 

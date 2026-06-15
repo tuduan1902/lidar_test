@@ -24,7 +24,7 @@
  *     (co vat chan tia lai)
  *
  * BU PHUOC (suspension compensation):
- *   - Khi xe thang: phuoc nen, mui xe nghieng xuong them ~2-5 do
+ *   - Khi xe thang: phuoc nen, mui xe chui xuong them ~2-5 do
  *   - pitch_total = PITCH_STATIC + pitch_from_suspension
  *   - expected_dist thay doi -> tranh bao dong gia
  *   - set_suspension(compression_mm) de cap nhat
@@ -47,6 +47,22 @@
  *     baseline_dist_ == expected_dist -> delta = 0 -> KHONG bao dong.
  *   - PITCH_STATIC_RAD / SLANT_RANGE_REF van giu lai chi de tham khao /
  *     log canh bao neu baseline_pitch_rad_ lech qua nhieu so voi thiet ke.
+ *
+ * RUI RO: KHOI DONG NGAY TREN/CANH VAT CAN / O GA
+ *   - Neu trong dung N_BASELINE mau dau co vat can/o ga ngay duoi LiDAR,
+ *     baseline_dist_ se la khoang cach toi vat do (sai), khien
+ *     baseline_pitch_rad_ bi lech CO DINH cho ca phien chay -> mat duong
+ *     phang thuc te sau do se bi bao sai (o ga/vat can gia) lien tuc.
+ *   - "Cong on dinh" (stability gate): trong cua so N_BASELINE mau, neu
+ *     (max-min) cua ema_dist_ > BASELINE_STABILITY_M -> coi la "khong on
+ *     dinh" (co vat/dang rung), KHONG chot calib, reset va thu lai cua so
+ *     ke tiep, toi da BASELINE_MAX_RETRIES lan.
+ *   - Het so lan thu ma van khong on dinh -> fallback dung PITCH_STATIC_RAD
+ *     (thiet ke) + in canh bao to, can nguoi van hanh goi recalibrate()
+ *     khi xe da o cho phang.
+ *   - request_recalibration() / recalibrate(): cho phep tinh lai baseline
+ *     bat ky luc nao (vd qua SIGUSR1 trong main_web.cpp) khi xac nhan xe
+ *     dang dung tren mat phang.
  *
  * OUTPUT:
  *   - road_timeline: mang dist theo thoi gian (ve bieu do)
@@ -71,7 +87,7 @@
 /* ============================================================
  * CAU HINH HINH HOC
  * ============================================================ */
-// Góc nghieng xuống là góc giữa tia laser và phương nằm ngang
+// Góc chúi xuống là góc giữa tia laser và phương nằm ngang
 static constexpr float H_MOUNT          = 1.0f;    /* m - do cao LiDAR */
 static constexpr float SLANT_RANGE_REF  = 2.0f;    /* m - slant range toi mat phang (THIET KE, xem tu calib) */
 static const float PITCH_STATIC_RAD = asin(H_MOUNT / SLANT_RANGE_REF); /* rad - goc nghieng THIET KE, dung lam fallback/tham khao */
@@ -99,8 +115,12 @@ static constexpr float DIST_MIN_M        = 0.3f;
  * ============================================================ */
 static constexpr float EMA_ALPHA    = 0.15f; /* loc rung phuoc */
 static constexpr int   N_CONFIRM    = 3;     /* mau lien tiep de xac nhan */
-static constexpr int   N_BASELINE   = 50;    /* so mau hoc baseline ban dau */
+static constexpr int   N_BASELINE   = 50;    /* so mau hoc baseline ban dau (1 cua so) */
 static constexpr int   TIMELINE_LEN = 300;   /* luu 300 diem gan nhat de ve */
+
+/* Cong on dinh cho tu-calib baseline (xem comment dau file) */
+static constexpr float BASELINE_STABILITY_M  = 0.04f; /* max-min cho phep trong 1 cua so (m) */
+static constexpr int   BASELINE_MAX_RETRIES  = 5;      /* so cua so toi da truoc khi fallback */
 
 /* ============================================================
  * PACKET (10 bytes tu STM32)
@@ -170,6 +190,11 @@ public:
 
     /* Trang thai tu-calib goc nghieng (xem comment dau file) */
     bool  is_calibrated()      const { return calibrated_.load(std::memory_order_relaxed); }
+    bool  calib_is_fallback()  const { return calib_fallback_.load(std::memory_order_relaxed); }
+
+    /* Yeu cau tinh lai baseline (vd qua SIGUSR1) - chi nen goi khi xe
+     * dang dung yen tren mat duong PHANG, khong vat can/o ga ngay duoi LiDAR. */
+    void request_recalibration() { recalib_request_.store(true, std::memory_order_relaxed); }
     float baseline_dist_m()    const {
         uint32_t v = baseline_dist_raw_.load(std::memory_order_relaxed);
         float f; std::memcpy(&f, &v, sizeof(f));
@@ -204,6 +229,8 @@ private:
 
     /* Tu-calib goc nghieng: ket qua sau N_BASELINE mau, doc tu thread khac (web) */
     std::atomic<bool>     calibrated_{false};
+    std::atomic<bool>     calib_fallback_{false}; /* true = dang dung PITCH_STATIC_RAD do calib khong on dinh */
+    std::atomic<bool>     recalib_request_{false};
     std::atomic<uint32_t> baseline_dist_raw_{0};
     std::atomic<uint32_t> baseline_pitch_raw_{0};
 
@@ -220,7 +247,10 @@ private:
 
     /* Baseline hoc (tu calib goc nghieng - xem comment dau file) */
     int     baseline_n_         = 0;
-    double  baseline_sum_        = 0.0;  /* tong ema_dist_ trong giai doan hoc */
+    double  baseline_sum_        = 0.0;  /* tong ema_dist_ trong cua so hien tai */
+    float   baseline_min_        = 0.0f; /* min/max ema_dist_ trong cua so hien tai, de check on dinh */
+    float   baseline_max_        = 0.0f;
+    int     baseline_retries_    = 0;    /* so cua so da thu khong on dinh */
     float   baseline_dist_       = 0.0f; /* dist trung binh khi mat phang (sau khi hoc xong) */
     float   baseline_pitch_rad_  = PITCH_STATIC_RAD; /* goc nghieng dung de tinh expected_dist, mac dinh = gia tri thiet ke truoc khi calib xong */
 
