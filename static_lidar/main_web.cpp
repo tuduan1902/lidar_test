@@ -4,23 +4,23 @@
  *
  * Build:
  * g++ -std=c++17 -O2 -lpthread \
- *     ./web/main_web.cpp ./web/road_scanner.cpp ./web/rear_scanner.cpp \
+ *     ./web/main_web.cpp ./web/road_scanner.cpp \
+ *     ./web/rear_scanner.cpp ./web/front_scanner.cpp \
  *     -o lidar_us_lidar
  *
- * Check data for UART PORT on Jetson:
- * hexdump -C /dev/ttyTHS1
- *
  * Run:
- * ./lidar_us_lidar /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
- *   arg1 ttyTHS1  : LiDAR ngang 2 tia (L0+L1 ne vat can truoc)
- *   arg2 ttyUSB0  : LiDAR chui 1 tia quet o ga (VB22A)
+ * ./lidar_us_lidar /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3
+ *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can)
+ *   arg2 ttyUSB0  : LiDAR chui quet o ga
  *   arg3 ttyUSB1  : Ultrasonic 4 cam bien
- *   arg4 ttyUSB2  : 5 LiDAR VB22A duoi xe (STM32F407 -> USB-UART)
+ *   arg4 ttyUSB2  : 5 LiDAR VB22A duoi xe (STM32 rear)
+ *   arg5 ttyUSB3  : 4 LiDAR VB22A dau xe  (STM32 front)
  */
 
 #include "grid_manager2.hpp"
 #include "road_scanner.hpp"
 #include "rear_scanner.hpp"
+#include "front_scanner.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -503,6 +503,10 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
     <span class="badge" id="r2">R2: --</span>
     <span class="badge" id="r3">R3: --</span>
     <span class="badge" id="r4">R4: --</span>
+    <span class="badge" id="f0">F0: --</span>
+    <span class="badge" id="f1">F1: --</span>
+    <span class="badge" id="f2">F2: --</span>
+    <span class="badge" id="f3">F3: --</span>
     <span class="badge" id="fps">-- pts/s</span>
   </div>
 </div>
@@ -543,6 +547,10 @@ function drawGrid(cells, sources, ox, oy, grid_n) {
       else if (src === 22) { r=160; g=255; b=40; }              /* Rear L2 -45: xanh vang */
       else if (src === 23) { r=80; g=255; b=80; }               /* Rear L3 +22.5: xanh la nhat */
       else if (src === 24) { r=160; g=255; b=40; }              /* Rear L4 +45: xanh vang */
+      else if (src === 30) { r=255; g=255; b=100; }             /* Front F0 ngoai trai: vang sang */
+      else if (src === 31) { r=255; g=220; b=80; }              /* Front F1 trong trai: vang cam */
+      else if (src === 32) { r=255; g=220; b=80; }              /* Front F2 trong phai: vang cam */
+      else if (src === 33) { r=255; g=255; b=100; }             /* Front F3 ngoai phai: vang sang */
       else if (val >= 200) { r=0;  g=180; b=255; }              /* strong: xanh duong */
       else if (val >= 80)  { r=0;  g=60;  b=90; }               /* light: xanh duong dam */
       else                 { r=17; g=17;  b=17; }               /* nen */
@@ -611,6 +619,20 @@ async function fetchData() {
       }
     }
 
+    // Cap nhat 4 badge LiDAR dau xe
+    const FRONT_LABELS = ['F0(nT)','F1(tT)','F2(tP)','F3(nP)'];
+    for (let i = 0; i < 4; i++) {
+      const v = d['front' + i];
+      const el = document.getElementById('f' + i);
+      if (v === undefined || v < 0) {
+        el.textContent = FRONT_LABELS[i] + ': --';
+        el.className = 'badge';
+      } else {
+        el.textContent = FRONT_LABELS[i] + ': ' + v.toFixed(2) + 'm';
+        el.className = 'badge ' + (v < 1.5 ? 'warn' : 'ok');
+      }
+    }
+
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
 
   } catch(e) {
@@ -649,35 +671,29 @@ struct WebState {
 
     /* 5 LiDAR sau duoi xe */
     uint32_t            rear_pts  = 0;
-    float               rear_dist[REAR_N_LIDAR] = {-1,-1,-1,-1,-1};
+    float               rear_dist[REAR_N_LIDAR]  = {-1,-1,-1,-1,-1};
+    uint32_t            front_pts = 0;
+    float               front_dist[FRONT_N_LIDAR] = {-1,-1,-1,-1};
 };
 static WebState g_web;
 
 /* Cap nhat WebState tu main loop */
 static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs,
-                       RearScanner& rear, float hz) {
+                       RearScanner& rear, FrontScanner& front, float hz) {
     (void)rs;
     std::lock_guard<std::mutex> lk(g_web.mtx);
     mgr.snapshot(g_web.cells, g_web.sources);
 
     g_web.lidar_pts = mgr.lidar_pts();
-    {
-        auto [y, type] = g_road_event.snapshot();
-        g_web.lidar_chui_y    = y;
-        g_web.lidar_chui_type = (int)type;
-    }
+    { auto [y,type] = g_road_event.snapshot(); g_web.lidar_chui_y=(y); g_web.lidar_chui_type=(int)type; }
     g_web.us_pts    = mgr.us_pts();
     g_web.hz        = hz;
-    for (int i = 0; i < 2; i++) {
-        g_web.l_mm[i]  = mgr.last_lidar_dist_mm(i);
-        g_web.l_a10[i] = mgr.last_lidar_angle_tenths(i);
-    }
-    for (int i = 0; i < 4; i++) g_web.us_cm[i] = mgr.last_us_cm(i);
-
-    /* Rear LiDAR */
+    for (int i=0;i<2;i++) { g_web.l_mm[i]=mgr.last_lidar_dist_mm(i); g_web.l_a10[i]=mgr.last_lidar_angle_tenths(i); }
+    for (int i=0;i<4;i++) g_web.us_cm[i] = mgr.last_us_cm(i);
     g_web.rear_pts = rear.pts_total();
-    for (int i = 0; i < REAR_N_LIDAR; i++)
-        g_web.rear_dist[i] = rear.last_dist_m(i);
+    for (int i=0;i<REAR_N_LIDAR;i++)  g_web.rear_dist[i]  = rear.last_dist_m(i);
+    g_web.front_pts = front.pts_total();
+    for (int i=0;i<FRONT_N_LIDAR;i++) g_web.front_dist[i] = front.last_dist_m(i);
 }
 
 /* Xu ly 1 HTTP connection */
@@ -698,18 +714,18 @@ static void handle_client(int client_fd) {
         int   lc_type; // 0=none, 1=pothole, 2=obstacle
         uint16_t lmm[2]; int32_t la10[2]; float ucm[4];
         uint32_t rear_pts; float rear_dist[REAR_N_LIDAR];
+        uint32_t front_pts; float front_dist[FRONT_N_LIDAR];
         {
             std::lock_guard<std::mutex> lk(g_web.mtx);
-            memcpy(cells,   g_web.cells,   sizeof(cells));
-            memcpy(sources, g_web.sources, sizeof(sources));
-
-            lc_y    = g_web.lidar_chui_y;
-            lc_type = g_web.lidar_chui_type;
-            lpts = g_web.lidar_pts; upts = g_web.us_pts; hz = g_web.hz;
-            for (int i = 0; i < 2; i++) { lmm[i] = g_web.l_mm[i]; la10[i] = g_web.l_a10[i]; }
-            for (int i = 0; i < 4; i++) ucm[i] = g_web.us_cm[i];
-            rear_pts = g_web.rear_pts;
-            for (int i = 0; i < REAR_N_LIDAR; i++) rear_dist[i] = g_web.rear_dist[i];
+            memcpy(cells,g_web.cells,sizeof(cells)); memcpy(sources,g_web.sources,sizeof(sources));
+            lc_y=g_web.lidar_chui_y; lc_type=g_web.lidar_chui_type;
+            lpts=g_web.lidar_pts; upts=g_web.us_pts; hz=g_web.hz;
+            for(int i=0;i<2;i++){lmm[i]=g_web.l_mm[i];la10[i]=g_web.l_a10[i];}
+            for(int i=0;i<4;i++) ucm[i]=g_web.us_cm[i];
+            rear_pts=g_web.rear_pts;
+            for(int i=0;i<REAR_N_LIDAR;i++)  rear_dist[i]=g_web.rear_dist[i];
+            front_pts=g_web.front_pts;
+            for(int i=0;i<FRONT_N_LIDAR;i++) front_dist[i]=g_web.front_dist[i];
         }
 
         /* Su dung std::string de cap phat bo nho dong an toan */
@@ -735,8 +751,11 @@ static void handle_client(int client_fd) {
         body += "\"lidar_chui_y\":" + std::to_string(lc_y) + ",";
         body += "\"lidar_chui_type\":" + std::to_string(lc_type) + ",";
         body += "\"rear_pts\":" + std::to_string(rear_pts) + ",";
-        for (int i = 0; i < REAR_N_LIDAR; i++)
-            body += "\"rear" + std::to_string(i) + "\":" + std::to_string(rear_dist[i]) + ",";
+        for (int i=0;i<REAR_N_LIDAR;i++)
+            body += "\"rear"+std::to_string(i)+"\":"+std::to_string(rear_dist[i])+",";
+        body += "\"front_pts\":" + std::to_string(front_pts) + ",";
+        for (int i=0;i<FRONT_N_LIDAR;i++)
+            body += "\"front"+std::to_string(i)+"\":"+std::to_string(front_dist[i])+",";
 
         // 2. Nối mảng cells
         body += "\"cells\":[";
@@ -815,7 +834,8 @@ int main(int argc, char** argv) {
     const char* lidar_dev = (argc > 1) ? argv[1] : "/dev/ttyTHS1";
     const char* road_dev  = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
     const char* us_dev    = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
-    const char* rear_dev  = (argc > 4) ? argv[4] : "/dev/ttyUSB2"; /* STM32 5 LiDAR duoi xe */
+    const char* rear_dev  = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
+    const char* front_dev = (argc > 5) ? argv[5] : "/dev/ttyUSB3"; /* STM32 4 LiDAR dau xe */
     
 
     printf("============================================================\n");
@@ -825,23 +845,27 @@ int main(int argc, char** argv) {
     printf("LiDAR Main Bus : %s @ 115200 (Chứa L0-L1 né vật cản)\n", lidar_dev);
     printf("Ultrasonic Bus : %s @ 115200\n", us_dev);
     printf("Rear LiDAR Bus : %s @ 460800 (5 LiDAR VB22A duoi xe, STM32)\n", rear_dev);
+    printf("Front LiDAR Bus: %s @ 460800 (4 LiDAR VB22A dau xe, STM32)\n", front_dev);
     printf("Open Web Interface: http://<JETSON_IP>:%d\n", WEB_PORT);
     printf("------------------------------------------------------------\n");
     fflush(stdout);
 
     // 1. Manager Lidar ngang & US
     FilteredCombinedManager mgr(lidar_dev, us_dev);
-    RoadScanner road_scanner(road_dev, 115200);
-    RearScanner rear_scanner(rear_dev, 460800);
+    RoadScanner  road_scanner(road_dev,  115200);
+    RearScanner  rear_scanner(rear_dev,  460800);
+    FrontScanner front_scanner(front_dev, 460800);
 
-    /* --------------------------------------------------------
-     * Callback RearScanner: moi diem hop le -> ghi len map
-     * src = 20 + id (20-24) de JS co the to mau rieng cho
-     * tung goc cua vong cung LiDAR sau.
-     * -------------------------------------------------------- */
     rear_scanner.on_point([&mgr](const RearPoint& pt) {
-        uint8_t src = (uint8_t)(20 + pt.id);
-        mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, src);
+        mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, (uint8_t)(20 + pt.id));
+    });
+
+    /* Front LiDAR: src 30-33, mau xanh luc nhat (phia truoc xe)
+     * wx = ox_m (vi tri ngang cua sensor, khong doi theo dist vi angle=90)
+     * wy = oy_m + dist_m (thang phia truoc)
+     * Diem nam dung phia truoc tung sensor, chinh xac. */
+    front_scanner.on_point([&mgr](const FrontPoint& pt) {
+        mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, (uint8_t)(30 + pt.id));
     });
 
     //Callback xử lý ổ gà
@@ -889,6 +913,7 @@ int main(int argc, char** argv) {
     mgr.start();
     road_scanner.start();
     rear_scanner.start();
+    front_scanner.start();
 
     std::thread http_thr(http_server_thread);
     http_thr.detach();
@@ -907,16 +932,13 @@ int main(int argc, char** argv) {
         last_us = up; 
         last_time = now;
 
-        web_update(mgr, road_scanner, rear_scanner, hz);
+        web_update(mgr, road_scanner, rear_scanner, front_scanner, hz);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    printf("\nStopping system safely...\n");
-    mgr.stop();
-    road_scanner.stop();
-    rear_scanner.stop();
-    printf("Successfully stopped. Total processed: lidar=%u us=%u rear=%u\n",
-           mgr.lidar_pts(), mgr.us_pts(), rear_scanner.pts_total());
+    mgr.stop(); road_scanner.stop(); rear_scanner.stop(); front_scanner.stop();
+    printf("Stopped. lidar=%u us=%u rear=%u front=%u\n",
+           mgr.lidar_pts(), mgr.us_pts(), rear_scanner.pts_total(), front_scanner.pts_total());
     return 0;
 }

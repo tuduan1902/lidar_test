@@ -7,7 +7,7 @@
  * PACKET (14 bytes, xem rear_lidar_stm32.h):
  *   [0]    = 0xBB  header
  *   [1]    = id    (0-4)
- *   [2,3]  = dist_cm     uint16 LE  (don vi cm)
+ *   [2,3]  = dist_mm     uint16 LE  (don vi mm)
  *   [4,5]  = strength    uint16 LE
  *   [6,7]  = temp_raw    uint16 LE  (nhiet do x10 do C)
  *   [8,9]  = angle_10    int16 LE   (goc x10 do, vd 1800 = 180.0 do)
@@ -66,8 +66,8 @@ static constexpr int     REAR_N_LIDAR  = 5;
 /* ============================================================
  * NGUONG LOC PHIA JETSON (co the khac STM32 neu can tinh chinh)
  * ============================================================ */
-static constexpr float REAR_DIST_MIN_M = 0.20f;
-static constexpr float REAR_DIST_MAX_M = 8.00f;
+static constexpr float REAR_DIST_MIN_M = 0.10f;
+static constexpr float REAR_DIST_MAX_M = 20.00f;
 
 /* ============================================================
  * STRUCTS
