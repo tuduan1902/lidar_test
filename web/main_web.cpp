@@ -796,7 +796,7 @@ int main(int argc, char** argv) {
 
         // Cùng giới hạn vùng quan tâm phía trước xe như on_obstacle, để 2 loại
         // sự kiện đối xứng nhau trên bản đồ/badge.
-        if (wy > 1.0f && wy < 3.0f) {
+        if (wy > 1.5f && wy < 3.0f) {
             g_road_event.update(wy, RoadEventType::POTHOLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10);
         }
@@ -813,7 +813,7 @@ int main(int argc, char** argv) {
         float wy = (sample.dist_ema_m * cosf(PITCH_STATIC_RAD)) + LIDAR_OY;
 
         // Đánh dấu lên map (hàm này chạy rất nhẹ, không lo tràn bộ nhớ)
-        if (wy > 1.0f && wy < 3.0f) {
+        if (wy > 1.5f && wy < 3.0f) {
             g_road_event.update(wy, RoadEventType::OBSTACLE);
             mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11);
         } else {

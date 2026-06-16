@@ -208,7 +208,7 @@ void RoadScanner::process_loop() {
                 pe.depth_m = -delta; /* chuyen gia tri am thanh do sau duong */
                 /* Tam chieu: cach dau xe bao xa */
                 pe.x_ahead_m = (ema_dist_ * cosf(pitch_tot)) + LIDAR_OY;
-
+                
                 {
                     std::lock_guard<std::mutex> lk(mtx_);
                     potholes_.push_back(pe);
