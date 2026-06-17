@@ -3,13 +3,11 @@
  * Separate filtered variant for 2x VB22A LiDAR + 4x ultrasonic + 5x rear VB22A.
  *
  * Build:
- * g++ -std=c++17 -O2 -lpthread \
- *     ./web/main_web.cpp \
- *     ./web/rear_scanner.cpp ./web/front_scanner.cpp \
- *     -o lidar_us_lidar
+ * g++ -std=c++17 -O2 -lpthread ./static_lidar/main_web.cpp ./static_lidar/rear_scanner.cpp ./static_lidar/front_scanner.cpp -o lidar_front_test
+ * 
  *
  * Run:
- * ./lidar_us_lidar /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
+ * ./lidar_front_test /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
  *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can hai ben)
  *   arg2 ttyUSB0  : Ultrasonic 4 cam bien
  *   arg3 ttyUSB1  : 5 LiDAR VB22A sau xe  (STM32 rear,  0xBB)

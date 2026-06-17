@@ -136,6 +136,7 @@ private:
 
     bool uart_open();
     void uart_close();
+    bool parse(const uint8_t* b, FrontPoint& out);
     bool parse_packet(const uint8_t* b, uint16_t& dist_mm_out,
                       float& ox_m, float& oy_m, uint8_t& id_out);
     FrontPoint process_straight(uint8_t id, float dist_m,
