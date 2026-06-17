@@ -877,7 +877,7 @@ int main(int argc, char** argv) {
 
         /* wy tinh trong process_tilt: oy_m + ema_dist*cos(pitch) */
         float wy = pt.wy;
-        if (wy < 0.5f || wy > 1.75f) return; /* loc ngoai vung quan tam */
+        if (wy < 1.5f || wy > 3.0f) return; /* loc ngoai vung quan tam */
 
         if (pt.is_pothole) {
             g_road_event.update(wy, RoadEventType::POTHOLE);
