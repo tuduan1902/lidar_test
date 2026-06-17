@@ -834,9 +834,13 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_sig);
 
     const char* lidar_dev = (argc > 1) ? argv[1] : "/dev/ttyTHS1";
-    const char* us_dev    = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
+    const char* front_dev = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
     const char* rear_dev  = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
-    const char* front_dev = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
+    const char* us_dev    = (argc > 4) ? argv[4] : "/dev/ttyUSB2";  
+
+    // const char* us_dev    = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
+    // const char* rear_dev  = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
+    // const char* front_dev = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
 
     printf("============================================================\n");
     printf("=== LIDAR FUSION SYSTEM (Rear 5x + Front 5x + LiDAR 2x) ===\n");

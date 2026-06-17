@@ -148,4 +148,4 @@ private:
         if (sp < 0.01f) sp = 0.01f;
         return FRONT_H_MOUNT / sp;
     }
-};
+}; 

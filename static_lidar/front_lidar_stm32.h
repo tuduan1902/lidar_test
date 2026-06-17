@@ -1,47 +1,60 @@
 /**
  * front_lidar_stm32.h
  * ============================================================
- * CUM 5 LiDAR VB22A DAU XE MAY tren STM32F407VET6:
- *   F0-F3: chieu THANG RA TRUOC (angle=90 do)
- *   F4   : LiDAR NGHIENG xuong mat duong (phat hien o ga)
+ * CUM 5 LiDAR VB22A DAU XE MAY - STM32F407VET6
  *
- * SO DO BO TRI (nhin tu tren xuong, mui xe huong len tren):
+ * THAY DOI SO VOI PHIEN BAN TRUOC:
+ *   - HAL_Delay(5) trong while(1) -> TIM6 ngat 5ms
+ *     CPU khong bi block, while(1) de trong hoan toan
+ *   - HAL_UART_Transmit blocking -> HAL_UART_Transmit_DMA
+ *     CPU khong doi khi gui packet len Jetson
+ *   - RX van dung IT (4 bytes/packet, can parse header byte-by-byte)
+ *   - Them co tx_busy tranh chong cheo DMA TX
  *
- *    ↑ ↑  ↑(nghieng)  ↑ ↑
- *    | |      |        | |
- *  [F0][F1] [F4]     [F2][F3]
- *  ngoai trong nghieng trong ngoai
- *  trai  trai  giua    phai  phai
+ * CUBEMX SETUP (bo sung so voi truoc):
+ *   1. Timers -> TIM6:
+ *      - Activated: checked
+ *      - Prescaler: 83  (84MHz / (83+1) = 1MHz)
+ *      - Counter Period: 4999  (1MHz / (4999+1) = 200Hz... sai)
+ *        Thuc ra: 1MHz / 5000 = 200Hz moi tick = 5ms. DUNG.
+ *      - auto-reload preload: Enable
+ *      - NVIC: TIM6 global interrupt -> Enable
  *
- * F4 - LiDAR nghieng (thay the road_scanner truoc day):
- *   - Goc chui: PITCH_STATIC_RAD = asin(H_MOUNT/SLANT_RANGE_REF)
- *   - STM32 KHONG tinh toan o ga, chi gui dist_mm len Jetson
- *   - Jetson (front_scanner.cpp) se tinh delta va phat hien o ga
- *   - ox=0 (giua xe), oy=+FRONT_TILT_OY_M (vi tri doc)
- *   - angle_deg = FRONT_TILT_ANGLE_DEG (goc nghieng, tinh tu +X)
- *     Gia tri nay >= 90 do vi tia chui xuong phia truoc-duoi
- *     Vi du: goc pitch 30 do so voi ngang -> angle = 90+30 = 120?
- *     Khong! He toa do map dung sin/cos(angle) theo truc XY san:
- *     Goc chui trong he toa do 3D (pitch), khong phai goc 2D map.
- *     -> F4 gui angle=90 (huong toi diem chieu xuong mat duong),
- *        Jetson dung hinh hoc 3D rieng (H_MOUNT, SLANT_RANGE_REF)
- *        de tinh expected_dist va delta, KHONG dung angle de map.
- *        Jetson map diem o ga tai (ox=0, oy_chieu) bang cos(pitch).
+ *   2. USART6 (Uplink Jetson):
+ *      - Mode: Asynchronous
+ *      - Baud: 460800, 8N1
+ *      - DMA Settings -> Add -> USART6_TX
+ *        Direction: Memory to Peripheral
+ *        Mode: Normal (khong phai Circular)
+ *        Data Width: Byte/Byte
+ *      - NVIC: USART6 global interrupt -> Enable
+ *        (de HAL_UART_TxCpltCallback chay duoc)
  *
- * PROTOCOL VB22A (4 bytes, datasheet V3.0):
+ *   3. USART1/2/3, UART4/5 (LiDAR sensors):
+ *      - Mode: Asynchronous, Baud: 460800, 8N1
+ *      - NVIC: global interrupt -> Enable (cho IT RX)
+ *      - KHONG can DMA cho RX (4 bytes/packet)
+ *
+ * THEM VAO main.c:
+ *   Includes  : #include "front_lidar_stm32.h"
+ *   USER CODE 2: FrontLidar_Init();
+ *   while(1)  : de trong (khong can gi ca)
+ *   USER CODE 4:
+ *     void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+ *         FrontLidar_UART_RxCallback(huart);
+ *     }
+ *     void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+ *         FrontLidar_TIM_Callback(htim);
+ *     }
+ *
+ * PROTOCOL VB22A (4 bytes):
  *   [0]=0x5C  [1]=dist_L  [2]=dist_H  [3]=~(dist_L+dist_H)
  *   dist don vi MM, baudrate 460800
  *   Lenh start: 5A 0A 02 02 00 F1
  *
- * PACKET UPLINK 12 bytes (STM32 -> Jetson, header 0xCC):
+ * PACKET UPLINK (12 bytes, header 0xCC):
  *   [0]=0xCC [1]=id(0-4) [2,3]=dist_mm [4,5]=angle_10
  *   [6,7]=ox_mm [8,9]=oy_mm [10]=XOR[1..9] [11]=0x55
- *   F4 gui angle_10=900 (angle=90, phu hieu, Jetson khong dung de map)
- *   F4 gui ox_mm=0, oy_mm=FRONT_TILT_OY_MM
- *
- * HARDWARE:
- *   F0->USART1  F1->USART2  F2->USART3
- *   F3->UART4   F4->UART5   Uplink->USART6@460800
  * ============================================================
  */
 #ifndef FRONT_LIDAR_STM32_H
@@ -70,25 +83,16 @@ static const uint8_t VB22A_CMD_STOP [VB22A_CMD_LEN] = {0x5A,0x0A,0x02,0x00,0x00,
 #define FRONT_PKT_LEN       12
 #define FRONT_PKT_HDR       0xCC
 #define FRONT_PKT_FTR       0x55
-#define FRONT_N_LIDAR       5      /* 4 thang + 1 nghieng */
-#define FRONT_ID_TILT       4      /* id cua LiDAR nghieng */
+#define FRONT_N_LIDAR       5
+#define FRONT_ID_TILT       4
 
 /* ============================================================
- * CAU HINH VI TRI (DIEU CHINH THEO THUC TE)
- *
- * F0-F3: angle=90 do (thang truoc), ox/oy theo vi tri lap
- * F4   : LiDAR nghieng - STM32 gui angle=90 va oy thuc te
- *        (Jetson se dung hinh hoc pitch rieng, khong dung angle nay)
- *
- * FRONT_TILT_OY_M : vi tri doc cua F4 so voi tam xe (m)
- *                   Duong = phia truoc. Sua theo thuc te.
+ * CAU HINH VI TRI SENSOR (sua theo thuc te)
  * ============================================================ */
-#define FRONT_TILT_OY_MM    800    /* 80cm phia truoc tam xe */
-
 typedef struct {
-    float    angle_deg;  /* goc gui len Jetson (F4: 90.0, Jetson dung pitch rieng) */
-    float    ox_m;
-    float    oy_m;
+    float angle_deg;
+    float ox_m;
+    float oy_m;
 } FrontLidarMount;
 
 static const FrontLidarMount FRONT_LIDAR_MOUNTS[FRONT_N_LIDAR] = {
@@ -106,13 +110,14 @@ extern UART_HandleTypeDef huart1; /* F0 */
 extern UART_HandleTypeDef huart2; /* F1 */
 extern UART_HandleTypeDef huart3; /* F2 */
 extern UART_HandleTypeDef huart4; /* F3 */
-extern UART_HandleTypeDef huart5; /* F4 LiDAR nghieng */
-extern UART_HandleTypeDef huart6; /* Uplink Jetson */
+extern UART_HandleTypeDef huart5; /* F4 nghieng */
+extern UART_HandleTypeDef huart6; /* Uplink Jetson - DMA TX */
+extern TIM_HandleTypeDef  htim6;  /* Timer 5ms trigger Process */
 
 #define FRONT_LIDAR_UART_LIST { &huart1, &huart2, &huart3, &huart4, &huart5 }
 
 /* ============================================================
- * TRANG THAI
+ * TRANG THAI SENSOR
  * ============================================================ */
 typedef struct {
     uint8_t  pkt[VB22A_PKT_LEN];
@@ -123,10 +128,21 @@ typedef struct {
 } FrontLidarState;
 
 /* ============================================================
- * PUBLIC
+ * PUBLIC API
  * ============================================================ */
+
+/* Goi 1 lan trong USER CODE BEGIN 2 cua main.c */
 void FrontLidar_Init(void);
-void FrontLidar_Process(void);
+
+/* Goi trong HAL_UART_RxCpltCallback cua main.c */
 void FrontLidar_UART_RxCallback(UART_HandleTypeDef* huart);
+
+/* Goi trong HAL_TIM_PeriodElapsedCallback cua main.c
+ * TIM6 ngat moi 5ms, ham nay quet 5 sensor va gui DMA */
+void FrontLidar_TIM_Callback(TIM_HandleTypeDef* htim);
+
+/* Goi trong HAL_UART_TxCpltCallback khi USART6 DMA TX hoan thanh
+ * if (huart->Instance == USART6) { FrontLidar_TxDone(); } */
+void FrontLidar_TxDone(void);
 
 #endif /* FRONT_LIDAR_STM32_H */
