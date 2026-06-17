@@ -4,21 +4,20 @@
  *
  * Build:
  * g++ -std=c++17 -O2 -lpthread \
- *     ./web/main_web.cpp ./web/road_scanner.cpp \
+ *     ./web/main_web.cpp \
  *     ./web/rear_scanner.cpp ./web/front_scanner.cpp \
  *     -o lidar_us_lidar
  *
  * Run:
- * ./lidar_us_lidar /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3
- *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can)
- *   arg2 ttyUSB0  : LiDAR chui quet o ga
- *   arg3 ttyUSB1  : Ultrasonic 4 cam bien
- *   arg4 ttyUSB2  : 5 LiDAR VB22A duoi xe (STM32 rear)
- *   arg5 ttyUSB3  : 4 LiDAR VB22A dau xe  (STM32 front)
+ * ./lidar_us_lidar /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
+ *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can hai ben)
+ *   arg2 ttyUSB0  : Ultrasonic 4 cam bien
+ *   arg3 ttyUSB1  : 5 LiDAR VB22A sau xe  (STM32 rear,  0xBB)
+ *   arg4 ttyUSB2  : 5 LiDAR VB22A dau xe  (STM32 front, 0xCC)
+ *                   id=0-3 thang truoc, id=4 nghieng quet o ga
  */
 
 #include "grid_manager2.hpp"
-#include "road_scanner.hpp"
 #include "rear_scanner.hpp"
 #include "front_scanner.hpp"
 #include <cstdio>
@@ -507,6 +506,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
     <span class="badge" id="f1">F1: --</span>
     <span class="badge" id="f2">F2: --</span>
     <span class="badge" id="f3">F3: --</span>
+    <span class="badge" id="f4">F4: --</span>
     <span class="badge" id="fps">-- pts/s</span>
   </div>
 </div>
@@ -620,16 +620,19 @@ async function fetchData() {
     }
 
     // Cap nhat 4 badge LiDAR dau xe
-    const FRONT_LABELS = ['F0(nT)','F1(tT)','F2(tP)','F3(nP)'];
-    for (let i = 0; i < 4; i++) {
+    const FRONT_LABELS = ['F0(nT)','F1(tT)','F2(tP)','F3(nP)','F4(o ga)'];
+    for (let i = 0; i < 5; i++) {
       const v = d['front' + i];
       const el = document.getElementById('f' + i);
+      if (!el) continue;
       if (v === undefined || v < 0) {
         el.textContent = FRONT_LABELS[i] + ': --';
         el.className = 'badge';
       } else {
         el.textContent = FRONT_LABELS[i] + ': ' + v.toFixed(2) + 'm';
-        el.className = 'badge ' + (v < 1.5 ? 'warn' : 'ok');
+        /* F4: canh bao khi khoang cach lech so voi SLANT_RANGE_REF */
+        const warn = (i < 4) ? v < 1.5 : (v < 1.8 || v > 2.2);
+        el.className = 'badge ' + (warn ? 'warn' : 'ok');
       }
     }
 
@@ -673,14 +676,13 @@ struct WebState {
     uint32_t            rear_pts  = 0;
     float               rear_dist[REAR_N_LIDAR]  = {-1,-1,-1,-1,-1};
     uint32_t            front_pts = 0;
-    float               front_dist[FRONT_N_LIDAR] = {-1,-1,-1,-1};
+    float               front_dist[FRONT_N_LIDAR] = {-1,-1,-1,-1,-1};
 };
 static WebState g_web;
 
 /* Cap nhat WebState tu main loop */
-static void web_update(FilteredCombinedManager& mgr, RoadScanner& rs,
+static void web_update(FilteredCombinedManager& mgr,
                        RearScanner& rear, FrontScanner& front, float hz) {
-    (void)rs;
     std::lock_guard<std::mutex> lk(g_web.mtx);
     mgr.snapshot(g_web.cells, g_web.sources);
 
@@ -832,86 +834,67 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_sig);
 
     const char* lidar_dev = (argc > 1) ? argv[1] : "/dev/ttyTHS1";
-    const char* road_dev  = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
-    const char* us_dev    = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
-    const char* rear_dev  = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
-    const char* front_dev = (argc > 5) ? argv[5] : "/dev/ttyUSB3"; /* STM32 4 LiDAR dau xe */
-    
+    const char* us_dev    = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
+    const char* rear_dev  = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
+    const char* front_dev = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
 
     printf("============================================================\n");
-    printf("=== TESTING ROAD SCANNER WITH EXISTING LIDAR L1 (HIJACK) ===\n");
+    printf("=== LIDAR FUSION SYSTEM (Rear 5x + Front 5x + LiDAR 2x) ===\n");
     printf("============================================================\n");
-    printf("Lidar Scanner Bus: %s @ 115200 (Chứa L0-L1 né vật cản)\n", road_dev);
-    printf("LiDAR Main Bus : %s @ 115200 (Chứa L0-L1 né vật cản)\n", lidar_dev);
-    printf("Ultrasonic Bus : %s @ 115200\n", us_dev);
-    printf("Rear LiDAR Bus : %s @ 460800 (5 LiDAR VB22A duoi xe, STM32)\n", rear_dev);
-    printf("Front LiDAR Bus: %s @ 460800 (4 LiDAR VB22A dau xe, STM32)\n", front_dev);
-    printf("Open Web Interface: http://<JETSON_IP>:%d\n", WEB_PORT);
+    printf("LiDAR ngang Bus: %s (2 tia ne vat can hai ben)\n", lidar_dev);
+    printf("Ultrasonic Bus : %s @ 115200 (4 cam bien)\n", us_dev);
+    printf("Rear  LiDAR Bus: %s @ 460800 (5 VB22A duoi xe, STM32 rear)\n",  rear_dev);
+    printf("Front LiDAR Bus: %s @ 460800 (5 VB22A dau xe,  STM32 front, id4=o ga)\n", front_dev);
+    printf("Web Interface  : http://<JETSON_IP>:%d\n", WEB_PORT);
     printf("------------------------------------------------------------\n");
     fflush(stdout);
 
     // 1. Manager Lidar ngang & US
     FilteredCombinedManager mgr(lidar_dev, us_dev);
-    RoadScanner  road_scanner(road_dev,  115200);
     RearScanner  rear_scanner(rear_dev,  460800);
     FrontScanner front_scanner(front_dev, 460800);
 
+    /* Rear LiDAR: src 20-24 (xanh la), 5 goc vong cung phia sau */
     rear_scanner.on_point([&mgr](const RearPoint& pt) {
         mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, (uint8_t)(20 + pt.id));
     });
 
-    /* Front LiDAR: src 30-33, mau xanh luc nhat (phia truoc xe)
-     * wx = ox_m (vi tri ngang cua sensor, khong doi theo dist vi angle=90)
-     * wy = oy_m + dist_m (thang phia truoc)
-     * Diem nam dung phia truoc tung sensor, chinh xac. */
+    /* Front LiDAR: xu ly ca 5 id trong 1 callback
+     * id 0-3: chieu thang, src 30-33 (vang), ghi diem lien tuc
+     * id 4  : LiDAR nghieng, chi ghi diem khi co su kien o ga/vat can */
     front_scanner.on_point([&mgr](const FrontPoint& pt) {
-        mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, (uint8_t)(30 + pt.id));
-    });
-
-    //Callback xử lý ổ gà
-    road_scanner.on_pothole([&mgr](const RoadSample& sample) {
-        // Với 1 tia cố định, tọa độ X (ngang) luôn bằng 0 (nằm giữa đầu xe).
-        float wx = 0.0f;
-
-        // Tọa độ Y (phía trước) = khoảng cách tia * cos(goc_chui) + khoảng_cách_gắn_lidar.
-        float wy = (sample.dist_ema_m * cosf(PITCH_STATIC_RAD)) + LIDAR_OY;
-
-        // Cùng giới hạn vùng quan tâm phía trước xe như on_obstacle, để 2 loại
-        // sự kiện đối xứng nhau trên bản đồ/badge.
-        if (wy > 0.5f && wy < 1.75f) {
-            g_road_event.update(wy, RoadEventType::POTHOLE);
-            mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 10);
-        }
-    });
-
-    // Callback xử lý gờ giảm tốc/vật cản (Khoảng cách đột ngột NGẮN lại)
-    road_scanner.on_obstacle([&mgr](const RoadSample& sample) {
-        // Biến static để lưu thời gian của lần kích hoạt gần nhất
-        static auto last_trigger = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-
-        // Tính toán tọa độ Y (X luôn bằng 0 vì tia nằm giữa)
-        float wx = 0.0f;
-        float wy = (sample.dist_ema_m * cosf(PITCH_STATIC_RAD)) + LIDAR_OY;
-
-        // Đánh dấu lên map (hàm này chạy rất nhẹ, không lo tràn bộ nhớ)
-        if (wy > 0.5f && wy < 1.75f) {
-            g_road_event.update(wy, RoadEventType::OBSTACLE);
-            mgr.mark_xy(wx, wy, FilteredMap::HIT_STRONG, 11);
-        } else {
+        if (pt.id != FRONT_ID_TILT) {
+            /* id 0-3: chieu thang, ghi diem binh thuong */
+            mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG,
+                        (uint8_t)(30 + pt.id));
             return;
         }
 
-        // RATE-LIMIT: Chỉ cho phép in log tối đa 5 lần/giây (mỗi 200ms)
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_trigger).count() >= 200) {
-            printf("[LiDAR Chúi] CẢNH BÁO: Vật cản tại Y = %.2f m\n", wy);
-            last_trigger = now; // Cập nhật lại mốc thời gian
-        }
+        /* id 4: LiDAR nghieng - chi xu ly khi co su kien xac nhan */
+        if (!pt.is_pothole && !pt.is_obstacle) return;
 
+        /* wy tinh trong process_tilt: oy_m + ema_dist*cos(pitch) */
+        float wy = pt.wy;
+        if (wy < 0.5f || wy > 1.75f) return; /* loc ngoai vung quan tam */
+
+        if (pt.is_pothole) {
+            g_road_event.update(wy, RoadEventType::POTHOLE);
+            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 10);
+        } else {
+            static auto last_log = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            g_road_event.update(wy, RoadEventType::OBSTACLE);
+            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 11);
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - last_log).count() >= 200) {
+                printf("[Front F4] Vat can Y=%.2fm delta=%.3fm\n",
+                       wy, pt.delta_m);
+                last_log = now;
+            }
+        }
     });
 
     mgr.start();
-    road_scanner.start();
     rear_scanner.start();
     front_scanner.start();
 
@@ -932,12 +915,12 @@ int main(int argc, char** argv) {
         last_us = up; 
         last_time = now;
 
-        web_update(mgr, road_scanner, rear_scanner, front_scanner, hz);
+        web_update(mgr, rear_scanner, front_scanner, hz);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    mgr.stop(); road_scanner.stop(); rear_scanner.stop(); front_scanner.stop();
+    mgr.stop(); rear_scanner.stop(); front_scanner.stop();
     printf("Stopped. lidar=%u us=%u rear=%u front=%u\n",
            mgr.lidar_pts(), mgr.us_pts(), rear_scanner.pts_total(), front_scanner.pts_total());
     return 0;
