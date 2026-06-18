@@ -3,15 +3,16 @@
  * Separate filtered variant for 2x VB22A LiDAR + 4x ultrasonic + 5x rear VB22A.
  *
  * Build:
- * g++ -std=c++17 -O2 -lpthread ./static_lidar/main_web.cpp ./static_lidar/rear_scanner.cpp ./static_lidar/front_scanner.cpp -o lidar_front_demo
+ * g++ -std=c++17 -O2 -lpthread ./static_lidar/main_web.cpp ./static_lidar/rear_scanner.cpp ./static_lidar/front_scanner.cpp -o lidar_front_test
+ * 
  *
  * Run:
- * ./lidar_front_demo /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
- *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can)
+ * ./lidar_front_test /dev/ttyTHS1 /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2
+ *   arg1 ttyTHS1  : LiDAR ngang 2 tia (ne vat can hai ben)
  *   arg2 ttyUSB0  : Ultrasonic 4 cam bien
  *   arg3 ttyUSB1  : 5 LiDAR VB22A sau xe  (STM32 rear,  0xBB)
  *   arg4 ttyUSB2  : 5 LiDAR VB22A dau xe  (STM32 front, 0xCC)
- *                   id=0-3 thang truoc, id=4 chui = LiDAR Chui (road_scanner logic)
+ *                   id=0-3 thang truoc, id=4 nghieng quet o ga
  */
 
 #include "grid_manager2.hpp"
@@ -477,28 +478,9 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   #wrap { display:flex; flex-direction:column; align-items:center; padding:12px; }
   #status { font-size:13px; margin-bottom:8px; color:#8cf; }
   canvas { image-rendering:pixelated; border:1px solid #333; }
-  #info {
-    margin-top:8px; font-size:11px; color:#aaa;
-    display:flex; flex-wrap:wrap; gap:5px 8px;
-    max-width:1100px; justify-content:flex-start;
-  }
-  .badge {
-    background:#1a1a2e; padding:3px 7px; border-radius:4px;
-    border:1px solid #333; white-space:nowrap;
-  }
-  /* Nhom mau phan biet ro rang */
-  .ok      { color:#4fc3f7; }   /* xanh duong nhat: binh thuong */
-  .warn    { color:#ffb300; }   /* vang cam: canh bao */
-  .pothole { color:#f06292; }   /* hong: o ga */
-  .c-lidar { color:#00e5ff; border-color:#00e5ff44; }  /* LiDAR ngang: cyan */
-  .c-us    { color:#ff9100; border-color:#ff910044; }  /* Ultrasonic: cam */
-  .c-chui  { color:#e040fb; border-color:#e040fb44; }  /* LiDAR Chui: tim */
-  .c-rear  { color:#69ff47; border-color:#69ff4744; }  /* Rear: xanh la neon */
-  .c-f0    { color:#ffe57f; border-color:#ffe57f44; }  /* F0 ngoai trai: vang nhat */
-  .c-f1    { color:#ffd740; border-color:#ffd74044; }  /* F1 trong trai: vang */
-  .c-f2    { color:#ffab40; border-color:#ffab4044; }  /* F2 trong phai: vang cam */
-  .c-f3    { color:#ff6d00; border-color:#ff6d0044; }  /* F3 ngoai phai: cam do */
-  .c-fps   { color:#546e7a; border-color:#333; }
+  #info { margin-top:8px; font-size:12px; color:#aaa; display:flex; gap:24px; }
+  .badge { background:#222; padding:4px 8px; border-radius:4px; }
+  .ok { color:#4f4; } .warn { color:#fa4; } .pothole { color:#f4f; }
 </style>
 </head>
 <body>
@@ -506,23 +488,24 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
   <div id="status">Connecting...</div>
   <canvas id="c"></canvas>
   <div id="info">
-    <span class="badge c-lidar" id="l0">L0: --</span>
-    <span class="badge c-lidar" id="l1">L1: --</span>
-    <span class="badge c-chui"  id="lidar-chui"><span id="lidar-chui-label">LiDAR Chúi</span>: <span id="lidar-chui-dist">--</span></span>
-    <span class="badge c-us"    id="u1">US1: --</span>
-    <span class="badge c-us"    id="u2">US2: --</span>
-    <span class="badge c-us"    id="u3">US3: --</span>
-    <span class="badge c-us"    id="u4">US4: --</span>
-    <span class="badge c-rear"  id="r0">R0(0°): --</span>
-    <span class="badge c-rear"  id="r1">R1(-22°): --</span>
-    <span class="badge c-rear"  id="r2">R2(-45°): --</span>
-    <span class="badge c-rear"  id="r3">R3(+22°): --</span>
-    <span class="badge c-rear"  id="r4">R4(+45°): --</span>
-    <span class="badge c-f0"    id="f0">F0(nT): --</span>
-    <span class="badge c-f1"    id="f1">F1(tT): --</span>
-    <span class="badge c-f2"    id="f2">F2(tP): --</span>
-    <span class="badge c-f3"    id="f3">F3(nP): --</span>
-    <span class="badge c-fps"   id="fps">-- pts/s</span>
+    <span class="badge" id="l0">L0: --</span>
+    <span class="badge" id="l1">L1: --</span>
+    <span class="badge" id="lidar-chui"><span id="lidar-chui-label">LiDAR chúi</span>: <span id="lidar-chui-dist">--</span></span>
+    <span class="badge" id="u1">US1: --</span>
+    <span class="badge" id="u2">US2: --</span>
+    <span class="badge" id="u3">US3: --</span>
+    <span class="badge" id="u4">US4: --</span>
+    <span class="badge" id="r0">R0: --</span>
+    <span class="badge" id="r1">R1: --</span>
+    <span class="badge" id="r2">R2: --</span>
+    <span class="badge" id="r3">R3: --</span>
+    <span class="badge" id="r4">R4: --</span>
+    <span class="badge" id="f0">F0: --</span>
+    <span class="badge" id="f1">F1: --</span>
+    <span class="badge" id="f2">F2: --</span>
+    <span class="badge" id="f3">F3: --</span>
+    <span class="badge" id="f4">F4: --</span>
+    <span class="badge" id="fps">-- pts/s</span>
   </div>
 </div>
 <script>
@@ -557,15 +540,15 @@ function drawGrid(cells, sources, ox, oy, grid_n) {
       else if (src === 11) { r=255; g=50; b=50; }               /* vat can: do */
       else if (src >= 1 && src <= 2) { r=0; g=229; b=255; }    /* LiDAR ngang: cyan */
       else if (src >= 3 && src <= 6) { r=255; g=180; b=0; }    /* ultrasonic: cam */
-      else if (src === 20) { r=105; g=255; b=71;  }  /* Rear L0 trung tam: xanh la tuoi */
-      else if (src === 21) { r=64;  g=255; b=128; }  /* Rear L1 -22.5: xanh la cyan */
-      else if (src === 22) { r=0;   g=230; b=180; }  /* Rear L2 -45: xanh ngoc */
-      else if (src === 23) { r=64;  g=255; b=128; }  /* Rear L3 +22.5: xanh la cyan */
-      else if (src === 24) { r=0;   g=230; b=180; }  /* Rear L4 +45: xanh ngoc */
-      else if (src === 30) { r=255; g=229; b=127; }  /* F0 ngoai trai: vang nhat */
-      else if (src === 31) { r=255; g=215; b=64;  }  /* F1 trong trai: vang */
-      else if (src === 32) { r=255; g=171; b=64;  }  /* F2 trong phai: vang cam */
-      else if (src === 33) { r=255; g=109; b=0;   }  /* F3 ngoai phai: cam do */
+      else if (src === 20) { r=0; g=255; b=120; }               /* Rear L0 trung tam: xanh la */
+      else if (src === 21) { r=80; g=255; b=80; }               /* Rear L1 -22.5: xanh la nhat */
+      else if (src === 22) { r=160; g=255; b=40; }              /* Rear L2 -45: xanh vang */
+      else if (src === 23) { r=80; g=255; b=80; }               /* Rear L3 +22.5: xanh la nhat */
+      else if (src === 24) { r=160; g=255; b=40; }              /* Rear L4 +45: xanh vang */
+      else if (src === 30) { r=255; g=255; b=100; }             /* Front F0 ngoai trai: vang sang */
+      else if (src === 31) { r=255; g=220; b=80; }              /* Front F1 trong trai: vang cam */
+      else if (src === 32) { r=255; g=220; b=80; }              /* Front F2 trong phai: vang cam */
+      else if (src === 33) { r=255; g=255; b=100; }             /* Front F3 ngoai phai: vang sang */
       else if (val >= 200) { r=0;  g=180; b=255; }              /* strong: xanh duong */
       else if (val >= 80)  { r=0;  g=60;  b=90; }               /* light: xanh duong dam */
       else                 { r=17; g=17;  b=17; }               /* nen */
@@ -597,50 +580,58 @@ async function fetchData() {
 
     const fmt = (mm) => mm === 65535 ? '--' : (mm/1000).toFixed(2)+'m';
     const fmtA = (a10) => (a10/10).toFixed(1)+'°';
+    document.getElementById('l0').textContent =
+      `L0: ${fmt(d.l0_mm)} ${fmtA(d.l0_a10)}`;
+    document.getElementById('l0').className =
+      'badge ' + (d.l0_mm === 65535 ? 'warn' : 'ok');
+    document.getElementById('l1').textContent =
+      `L1: ${fmt(d.l1_mm)} ${fmtA(d.l1_a10)}`;
+    document.getElementById('l1').className =
+      'badge ' + (d.l1_mm === 65535 ? 'warn' : 'ok');
 
-    // L0 L1: cyan, giu class c-lidar
-    document.getElementById('l0').textContent = `L0: ${fmt(d.l0_mm)} ${fmtA(d.l0_a10)}`;
-    document.getElementById('l0').className   = 'badge c-lidar' + (d.l0_mm === 65535 ? ' warn' : '');
-    document.getElementById('l1').textContent = `L1: ${fmt(d.l1_mm)} ${fmtA(d.l1_a10)}`;
-    document.getElementById('l1').className   = 'badge c-lidar' + (d.l1_mm === 65535 ? ' warn' : '');
-
-    // Ultrasonic: cam, giu class c-us
     const uf = (v) => v < 0 ? '--' : v.toFixed(1)+'cm';
     ['u1','u2','u3','u4'].forEach((id,i) => {
-      const el = document.getElementById(id);
-      el.textContent = `US${i+1}: ${uf(d['us'+i])}`;
-      el.className   = 'badge c-us' + (d['us'+i] >= 0 && d['us'+i] < 30 ? ' warn' : '');
+      document.getElementById(id).textContent = `US${i+1}: ${uf(d['us'+i])}`;
     });
 
-    // LiDAR Chui (id=4 tu STM32 front, xu ly qua road_scanner logic): tim
+    // Cập nhật khoảng cách LiDAR chúi (su kien o ga/vat can gan nhat, "--" neu da cu/khong co)
     const lcType  = d.lidar_chui_type || 0;
-    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR Chúi');
-    const lcDist  = (d.lidar_chui_y >= 0) ? d.lidar_chui_y.toFixed(2) + ' m' : '--';
+    const lcLabel = lcType === 1 ? 'Ổ gà' : (lcType === 2 ? 'Vật cản' : 'LiDAR chúi');
+    const lcDist  = (d.lidar_chui_y >= 0) ? d.lidar_chui_y.toFixed(2) + " m" : "--";
     document.getElementById('lidar-chui-label').textContent = lcLabel;
-    document.getElementById('lidar-chui-dist').innerText    = lcDist;
+    document.getElementById('lidar-chui-dist').innerText = lcDist;
     document.getElementById('lidar-chui').className =
-      'badge c-chui' + (lcType === 1 ? ' pothole' : lcType === 2 ? ' warn' : '');
+      'badge ' + (lcType === 1 ? 'pothole' : (lcType === 2 ? 'warn' : ''));
 
-    // Rear R0-R4: xanh la neon, giu class c-rear
+    // Cap nhat 5 badge LiDAR duoi xe
     const REAR_LABELS = ['R0(0°)','R1(-22°)','R2(-45°)','R3(+22°)','R4(+45°)'];
     for (let i = 0; i < 5; i++) {
-      const v  = d['rear' + i];
+      const v = d['rear' + i];
       const el = document.getElementById('r' + i);
-      if (!el) continue;
-      el.textContent = REAR_LABELS[i] + ': ' + (v >= 0 ? v.toFixed(2)+'m' : '--');
-      el.className   = 'badge c-rear' + (v >= 0 && v < 1.0 ? ' warn' : '');
+      if (v === undefined || v < 0) {
+        el.textContent = REAR_LABELS[i] + ': --';
+        el.className = 'badge';
+      } else {
+        el.textContent = REAR_LABELS[i] + ': ' + v.toFixed(2) + 'm';
+        el.className = 'badge ' + (v < 1.0 ? 'warn' : 'ok');
+      }
     }
 
-    // Front F0-F3 THANG (chi 4 con, id=4 la LiDAR Chui hien o tren roi)
-    // Moi con 1 mau rieng biet
-    const F_CLASSES = ['c-f0','c-f1','c-f2','c-f3'];
-    const F_LABELS  = ['F0(nT)','F1(tT)','F2(tP)','F3(nP)'];
-    for (let i = 0; i < 4; i++) {
-      const v  = d['front' + i];
+    // Cap nhat 4 badge LiDAR dau xe
+    const FRONT_LABELS = ['F0(nT)','F1(tT)','F2(tP)','F3(nP)','F4(o ga)'];
+    for (let i = 0; i < 5; i++) {
+      const v = d['front' + i];
       const el = document.getElementById('f' + i);
       if (!el) continue;
-      el.textContent = F_LABELS[i] + ': ' + (v >= 0 ? v.toFixed(2)+'m' : '--');
-      el.className   = 'badge ' + F_CLASSES[i] + (v >= 0 && v < 1.5 ? ' warn' : '');
+      if (v === undefined || v < 0) {
+        el.textContent = FRONT_LABELS[i] + ': --';
+        el.className = 'badge';
+      } else {
+        el.textContent = FRONT_LABELS[i] + ': ' + v.toFixed(2) + 'm';
+        /* F4: canh bao khi khoang cach lech so voi SLANT_RANGE_REF */
+        const warn = (i < 4) ? v < 1.5 : (v < 1.8 || v > 2.2);
+        el.className = 'badge ' + (warn ? 'warn' : 'ok');
+      }
     }
 
     document.getElementById('fps').textContent = `${d.hz.toFixed(0)} pts/s`;
@@ -841,22 +832,22 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_sig);
 
     const char* lidar_dev = (argc > 1) ? argv[1] : "/dev/ttyTHS1";
-
     const char* front_dev = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
     const char* rear_dev  = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
-    const char* us_dev    = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
+    const char* us_dev    = (argc > 4) ? argv[4] : "/dev/ttyUSB2";  
+
     // const char* us_dev    = (argc > 2) ? argv[2] : "/dev/ttyUSB0";
     // const char* rear_dev  = (argc > 3) ? argv[3] : "/dev/ttyUSB1";
     // const char* front_dev = (argc > 4) ? argv[4] : "/dev/ttyUSB2";
 
     printf("============================================================\n");
-    printf("=== LIDAR FUSION SYSTEM ===\n");
+    printf("=== LIDAR FUSION SYSTEM (Rear 5x + Front 5x + LiDAR 2x) ===\n");
     printf("============================================================\n");
-    printf("LiDAR ngang Bus : %s\n", lidar_dev);
-    printf("Ultrasonic Bus  : %s @ 115200\n", us_dev);
-    printf("Rear  LiDAR Bus : %s @ 460800 (5 VB22A duoi xe)\n", rear_dev);
-    printf("Front LiDAR Bus : %s @ 460800 (id0-3 thang, id4=LiDAR Chui)\n", front_dev);
-    printf("Web Interface   : http://<JETSON_IP>:%d\n", WEB_PORT);
+    printf("LiDAR ngang Bus: %s (2 tia ne vat can hai ben)\n", lidar_dev);
+    printf("Ultrasonic Bus : %s @ 115200 (4 cam bien)\n", us_dev);
+    printf("Rear  LiDAR Bus: %s @ 460800 (5 VB22A duoi xe, STM32 rear)\n",  rear_dev);
+    printf("Front LiDAR Bus: %s @ 460800 (5 VB22A dau xe,  STM32 front, id4=o ga)\n", front_dev);
+    printf("Web Interface  : http://<JETSON_IP>:%d\n", WEB_PORT);
     printf("------------------------------------------------------------\n");
     fflush(stdout);
 
@@ -865,41 +856,40 @@ int main(int argc, char** argv) {
     RearScanner  rear_scanner(rear_dev,  460800);
     FrontScanner front_scanner(front_dev, 460800);
 
-    /* Rear LiDAR: src 20-24, 5 goc vong cung phia sau */
+    /* Rear LiDAR: src 20-24 (xanh la), 5 goc vong cung phia sau */
     rear_scanner.on_point([&mgr](const RearPoint& pt) {
         mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG, (uint8_t)(20 + pt.id));
     });
 
-    /* Front LiDAR callback:
-     *   id 0-3: sensor thang truoc, src 30-33, ghi diem binh thuong
-     *   id 4  : LiDAR Chui (UART5 tren STM32), dung road_scanner logic
-     *           (EMA + baseline + delta + confirm) da xu ly trong process_tilt()
-     *           -> publish vao g_road_event va badge "LiDAR Chui" y chang cu */
+    /* Front LiDAR: xu ly ca 5 id trong 1 callback
+     * id 0-3: chieu thang, src 30-33 (vang), ghi diem lien tuc
+     * id 4  : LiDAR nghieng, chi ghi diem khi co su kien o ga/vat can */
     front_scanner.on_point([&mgr](const FrontPoint& pt) {
         if (pt.id != FRONT_ID_TILT) {
-            /* id 0-3: chieu thang */
+            /* id 0-3: chieu thang, ghi diem binh thuong */
             mgr.mark_xy(pt.wx, pt.wy, FilteredMap::HIT_STRONG,
                         (uint8_t)(30 + pt.id));
             return;
         }
 
-        /* id=4: LiDAR Chui — chi xu ly khi da duoc xac nhan (confirm >= N_CONFIRM) */
+        /* id 4: LiDAR nghieng - chi xu ly khi co su kien xac nhan */
         if (!pt.is_pothole && !pt.is_obstacle) return;
 
-        float wy = pt.wy;  /* oy_m + ema_dist*cos(pitch), tinh trong process_tilt */
-        if (wy < 1.5f || wy > 3.0f) return;
+        /* wy tinh trong process_tilt: oy_m + ema_dist*cos(pitch) */
+        float wy = pt.wy;
+        if (wy < 1.5f || wy > 3.0f) return; /* loc ngoai vung quan tam */
 
         if (pt.is_pothole) {
             g_road_event.update(wy, RoadEventType::POTHOLE);
-            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 10); /* hong: o ga */
+            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 10);
         } else {
             static auto last_log = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
             g_road_event.update(wy, RoadEventType::OBSTACLE);
-            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 11); /* do: vat can */
+            mgr.mark_xy(pt.wx, wy, FilteredMap::HIT_STRONG, 11);
             if (std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - last_log).count() >= 200) {
-                printf("[LiDAR Chui] Vat can Y=%.2fm delta=%.3fm\n",
+                printf("[Front F4] Vat can Y=%.2fm delta=%.3fm\n",
                        wy, pt.delta_m);
                 last_log = now;
             }
@@ -928,6 +918,7 @@ int main(int argc, char** argv) {
         last_time = now;
 
         web_update(mgr, rear_scanner, front_scanner, hz);
+
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 

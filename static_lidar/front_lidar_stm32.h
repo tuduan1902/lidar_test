@@ -77,8 +77,8 @@ extern const uint8_t VB22A_CMD_STOP [VB22A_CMD_LEN];
 #define FRONT_PKT_LEN       12
 #define FRONT_PKT_HDR       0xCC
 #define FRONT_PKT_FTR       0x55
-#define FRONT_N_LIDAR       5
-#define FRONT_ID_TILT       4
+#define FRONT_N_LIDAR       5      /* 4 con chieu thang + 1 con chui (id=4, UART5) */
+#define FRONT_ID_TILT       4      /* id=4: LiDAR chui, xu ly bang road_scanner logic tren Jetson */
 
 /* ============================================================
  * CAU HINH VI TRI SENSOR (sua theo thuc te)
