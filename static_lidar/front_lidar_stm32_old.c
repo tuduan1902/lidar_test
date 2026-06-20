@@ -10,7 +10,7 @@
  *   3. LED debug PA6: nhay theo trang thai he thong.
  * ============================================================
  */
-#include "lidar_stm32_3.h"
+#include "front_lidar_stm32.h"
 #include <string.h>
 
 /* ============================================================

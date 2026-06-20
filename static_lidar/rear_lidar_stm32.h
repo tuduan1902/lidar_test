@@ -10,6 +10,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define REAR_DEBUG_LED_ENABLE
+#define REAR_DEBUG_LED_PORT    GPIOA
+#define REAR_DEBUG_LED_PIN     GPIO_PIN_6
+
 /* ============================================================
  * PROTOCOL VB22A (dung chung voi front)
  * ============================================================ */
@@ -20,8 +24,8 @@
 #define VB22A_DIST_MIN_MM    50
 #define VB22A_DIST_MAX_MM    19999
 
-static const uint8_t VB22A_CMD_START[VB22A_CMD_LEN] = {0x5A,0x0A,0x02,0x02,0x00,0xF1};
-static const uint8_t VB22A_CMD_STOP [VB22A_CMD_LEN] = {0x5A,0x0A,0x02,0x00,0x00,0xF3};
+extern const uint8_t VB22A_CMD_START[VB22A_CMD_LEN];
+extern const uint8_t VB22A_CMD_STOP [VB22A_CMD_LEN];
 
 /* ============================================================
  * PACKET UPLINK (12 bytes, header 0xBB)
@@ -29,7 +33,7 @@ static const uint8_t VB22A_CMD_STOP [VB22A_CMD_LEN] = {0x5A,0x0A,0x02,0x00,0x00,
 #define REAR_PKT_LEN         12
 #define REAR_PKT_HDR         0xBB
 #define REAR_PKT_FTR         0x55
-#define REAR_N_LIDAR         5
+#define REAR_N_LIDAR         3
 
 /* ============================================================
  * CUBEMX SETUP (rear board):
@@ -62,13 +66,8 @@ typedef struct {
     float oy_m;
 } RearLidarMount;
 
-static const RearLidarMount REAR_LIDAR_MOUNTS[REAR_N_LIDAR] = {
-    /* id=0 L0 thang sau    */ { 180.0f,  0.00f, -0.85f },
-    /* id=1 L1 -22.5 do T   */ { 157.5f, -0.15f, -0.85f },
-    /* id=2 L2 -45  do T    */ { 135.0f, -0.30f, -0.85f },
-    /* id=3 L3 +22.5 do P   */ { 202.5f, +0.15f, -0.85f },
-    /* id=4 L4 +45  do P    */ { 225.0f, +0.30f, -0.85f },
-};
+extern const RearLidarMount REAR_LIDAR_MOUNTS[REAR_N_LIDAR];
+
 
 /* ============================================================
  * UART MAPPING
@@ -76,12 +75,10 @@ static const RearLidarMount REAR_LIDAR_MOUNTS[REAR_N_LIDAR] = {
 extern UART_HandleTypeDef huart1; /* L0 */
 extern UART_HandleTypeDef huart2; /* L1 */
 extern UART_HandleTypeDef huart3; /* L2 */
-extern UART_HandleTypeDef huart4; /* L3 */
-extern UART_HandleTypeDef huart5; /* L4 */
 extern UART_HandleTypeDef huart6; /* Uplink Jetson DMA TX */
-extern TIM_HandleTypeDef  htim7;  /* Timer 5ms */
+extern TIM_HandleTypeDef  htim6;  /* Timer 5ms */
 
-#define REAR_LIDAR_UART_LIST { &huart1, &huart2, &huart3, &huart4, &huart5 }
+#define REAR_LIDAR_UART_LIST { &huart1, &huart2, &huart3}
 
 /* ============================================================
  * TRANG THAI
@@ -95,11 +92,25 @@ typedef struct {
 } RearLidarState;
 
 /* ============================================================
+ * BIEN DEBUG (doc tu Watch window Keil)
+ * ============================================================ */
+extern volatile uint32_t g_dbg_rx_bytes;      /* tong byte nhan tu tat ca sensor */
+extern volatile uint32_t g_dbg_pkt_ok;        /* tong packet VB22A checksum dung */
+extern volatile uint32_t g_dbg_pkt_bad_chk;   /* packet sai checksum */
+extern volatile uint32_t g_dbg_tx_sent;       /* tong packet da gui qua DMA */
+extern volatile uint32_t g_dbg_tx_busy_skip;  /* so lan DMA ban, phai hoan gui */
+extern volatile uint32_t g_dbg_tim6_tick;     /* so lan TIM6 ngat */
+extern volatile uint8_t  g_dbg_sensor_data[REAR_N_LIDAR]; /* 1=sensor co data */
+extern volatile uint32_t g_dbg_uart_err;      /* so lan UART ErrorCallback */
+
+
+/* ============================================================
  * PUBLIC API
  * ============================================================ */
 void RearLidar_Init(void);
 void RearLidar_UART_RxCallback(UART_HandleTypeDef* huart);
 void RearLidar_TIM_Callback(TIM_HandleTypeDef* htim);
 void RearLidar_TxDone(void);
+void RearLidar_UART_ErrorCallback(UART_HandleTypeDef* huart);
 
 #endif /* REAR_LIDAR_STM32_H */
