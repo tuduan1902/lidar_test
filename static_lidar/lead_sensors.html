@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bố trí cảm biến — Xe máy tự lái né vật cản (Honda Lead)</title>
+<style>
+  body{margin:0;background:#f0efe9;color:#2c2c2a;font-family:system-ui,Segoe UI,Roboto,sans-serif;}
+  .page{max-width:760px;margin:0 auto;padding:20px 16px 40px;}
+  h1{font-size:20px;margin:0 0 2px;}
+  .meta{color:#6b6b66;font-size:13px;margin-bottom:14px;}
+  .l6btn{padding:5px 12px;border:1px solid #bbb;background:#fff;color:inherit;border-radius:8px;cursor:pointer;font-size:13px;}
+  .l6btn.on{background:#7F77DD;color:#fff;border-color:#7F77DD;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Bố trí cảm biến — Xe máy tự lái né vật cản</h1>
+
+  <div id="lead-app">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px;font-size:13px;">
+      <button id="f-iso" class="l6btn">Chéo (3D)</button>
+      <button id="f-top" class="l6btn">Trên</button>
+      <button id="f-rng" class="l6btn">Phạm vi (m)</button>
+      <button id="f-side" class="l6btn">Bên (tầng)</button>
+      <label style="display:flex;gap:5px;align-items:center;cursor:pointer;"><input type="checkbox" id="fov6" checked> Chùm tia</label>
+      <label style="display:flex;gap:6px;align-items:center;flex:1;min-width:140px;">Xoay <input type="range" id="yaw6" min="-180" max="180" value="32" style="flex:1;"></label>
+    </div>
+    <svg id="lead-cv" viewBox="0 0 700 460" style="width:100%;background:#f5f4ef;border:1px solid #ddd;border-radius:12px;"></svg>
+    <div style="font-size:13px;line-height:1.85;margin-top:12px;">
+      <div style="margin-bottom:8px;">
+        <span style="font-weight:700;color:#5b53b8;">● VB22A ×15</span> — cảm biến hồng ngoại, đo xa. &nbsp;
+        <span style="font-weight:700;color:#1f6fc0;">● Siêu âm ×10</span> — đo gần. &nbsp;
+        Tổng 25 cảm biến, gom qua 5 mạch ESP32-S3 về máy tính OrangePi.
+      </div>
+      <div style="margin-bottom:4px;"><b>1. VB22A phía trước</b> (3 tầng × 3 hướng): tầng dưới gắn ở dè và chếch xuống để phát hiện ổ gà cùng vật thấp; tầng giữa nhìn thẳng để bắt vật cản phía trước; tầng trên chếch lên để phát hiện xe tải/container từ khoảng 20 m, kịp giảm tốc.</div>
+      <div style="margin-bottom:4px;"><b>2. Siêu âm phía trước</b> (×3): cảnh báo vật cản ở cự ly gần ngay trước đầu xe.</div>
+      <div style="margin-bottom:4px;"><b>3. Siêu âm hai bên hông</b> (×4, gắn chéo): bao quát điểm mù hai bên khi chuyển làn.</div>
+      <div style="margin-bottom:4px;"><b>4. VB22A phía sau</b> (2 tầng × 3 hướng): xác định xe vượt lên bên trái hay bên phải, loại phương tiện và tốc độ; kèm <b>3 siêu âm phía sau</b> hỗ trợ lùi.</div>
+      <div style="color:#6b6b66;margin-top:8px;">Góc tỏa: VB22A 3° (chùm hẹp như tia laser), siêu âm khoảng 30° (chùm rộng). Tầm đo: siêu âm khoảng 4 m, VB22A khoảng 20 m.</div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var cv=document.getElementById('lead-cv'), yawEl=document.getElementById('yaw6'), fovEl=document.getElementById('fov6');
+  var B={iso:document.getElementById('f-iso'),top:document.getElementById('f-top'),rng:document.getElementById('f-rng'),side:document.getElementById('f-side')};
+  var mode='iso', cx=350, cy=235;
+
+  function P(p){
+    var a=(+yawEl.value)*Math.PI/180, z=p.z||0;
+    var xr=p.x*Math.cos(a)-p.y*Math.sin(a), yr=p.x*Math.sin(a)+p.y*Math.cos(a), sx, sy, S;
+    if(mode==='iso'){ S=1.7; sx=cx+xr*S; sy=cy+yr*S*0.5 - z*S*0.78; }
+    else if(mode==='top'){ S=1.85; sx=cx+xr*S; sy=cy - yr*S; }
+    else if(mode==='side'){ S=2.0; sx=cx + p.y*S; sy=420 - z*S; }
+    else { S=0.09; sx=cx+xr*S; sy=cy - yr*S; }
+    return {sx:sx, sy:sy, d:(mode==='side'? -p.x : yr)};
+  }
+  function shade(hex,f){var h=hex.replace('#',''),r=parseInt(h.substr(0,2),16),g=parseInt(h.substr(2,2),16),b=parseInt(h.substr(4,2),16);
+    function c(v){return Math.max(0,Math.min(255,Math.round(v*f)));} return 'rgb('+c(r)+','+c(g)+','+c(b)+')';}
+
+  // FIX: san xe noi lien yem truoc (y1: 34 -> 56) de khong bi roi dau xe
+  var BOX=[
+    [-22,22,-12,56,6,12,'#C7CFD7'],[-26,26,54,66,10,96,'#BCC6CF'],[-30,30,58,66,96,104,'#5F6B76'],
+    [-18,18,-56,6,54,70,'#33373D'],[-24,24,-82,-30,12,60,'#C2CAD2'],[-16,16,-52,2,12,56,'#C7CFD7'],
+    [-6,6,66,82,0,34,'#26262b'],[-6,6,-82,-66,0,34,'#26262b'],[-11,11,66,70,52,78,'#FAC775']
+  ];
+  var FI=[[0,1,2,3,0.7],[4,5,6,7,1.18],[3,2,6,7,1.0],[0,1,5,4,0.9],[0,3,7,4,0.8],[1,2,6,5,0.88]];
+
+  var SEN=[];
+  function add(cl,t,arr){arr.forEach(function(o){o.cl=cl;o.t=t;if(o.pitch===undefined)o.pitch=0;SEN.push(o);});}
+  add(1,'vb',[
+    {x:0,y:66,z:92,yaw:0,pitch:6},{x:18,y:64,z:92,yaw:30,pitch:6},{x:-18,y:64,z:92,yaw:-30,pitch:6},
+    {x:0,y:66,z:64,yaw:0},{x:18,y:64,z:64,yaw:30},{x:-18,y:64,z:64,yaw:-30},
+    {x:0,y:72,z:28,yaw:0,pitch:-20},{x:14,y:72,z:28,yaw:12,pitch:-20},{x:-14,y:72,z:28,yaw:-12,pitch:-20}
+  ]);
+  add(2,'us',[{x:0,y:66,z:56,yaw:0},{x:16,y:66,z:56,yaw:28},{x:-16,y:66,z:56,yaw:-28}]);
+  add(3,'us',[{x:28,y:22,z:34,yaw:52},{x:-28,y:22,z:34,yaw:-52},{x:28,y:-26,z:34,yaw:128},{x:-28,y:-26,z:34,yaw:-128}]);
+  add(4,'vb',[
+    {x:0,y:-82,z:46,yaw:180},{x:16,y:-84,z:46,yaw:158},{x:-16,y:-84,z:46,yaw:202},
+    {x:0,y:-82,z:78,yaw:180},{x:16,y:-84,z:78,yaw:158},{x:-16,y:-84,z:78,yaw:202}
+  ]);
+  add(4,'us',[{x:0,y:-82,z:32,yaw:180},{x:15,y:-83,z:32,yaw:165},{x:-15,y:-83,z:32,yaw:195}]);
+
+  var TP={vb:{fov:3,col:'#7F77DD',fill:'rgba(127,119,221,.30)'},us:{fov:30,col:'#378ADD',fill:'rgba(55,138,221,.15)'}};
+  function blen(t){ if(mode==='rng') return t==='vb'?2000:400; if(mode==='side') return t==='vb'?260:90; return t==='vb'?150:70; }
+
+  function beamPts(s){
+    var tp=TP[s.t], half=tp.fov/2*Math.PI/180, p=s.pitch*Math.PI/180, L=blen(s.t);
+    function end(off){var y=s.yaw*Math.PI/180+off, dx=Math.sin(y)*Math.cos(p), dy=Math.cos(y)*Math.cos(p), dz=Math.sin(p);
+      return P({x:s.x+dx*L,y:s.y+dy*L,z:s.z+dz*L});}
+    var a=P({x:s.x,y:s.y,z:s.z}), e1=end(-half), e2=end(half);
+    return a.sx+','+a.sy+' '+e1.sx+','+e1.sy+' '+e2.sx+','+e2.sy;
+  }
+
+  function render(){
+    mode = B.top.classList.contains('on')?'top':(B.rng.classList.contains('on')?'rng':(B.side.classList.contains('on')?'side':'iso'));
+    var s='';
+    if(mode==='rng'){
+      [2,5,10,20].forEach(function(m){var r=m*9;
+        s+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="#9a988f" stroke-width="1" stroke-dasharray="3 3"/>';
+        s+='<text x="'+cx+'" y="'+(cy-r-2)+'" text-anchor="middle" font-size="10" fill="#8a8880">'+m+'m</text>';});
+    }
+    if(mode==='side'){
+      s+='<line x1="40" y1="420" x2="660" y2="420" stroke="#9a988f" stroke-width="1.5"/>';
+      [['trên ↗',92],['giữa →',64],['dưới(dè) ↘',28]].forEach(function(t){var yy=420-t[1]*2.0;
+        s+='<text x="44" y="'+(yy+4)+'" font-size="10" fill="#8a8880">'+t[0]+'</text>';});
+      s+='<rect x="470" y="200" width="150" height="86" fill="#bcbdb4" opacity=".5"/><text x="545" y="195" text-anchor="middle" font-size="10" fill="#9a988f">container gầm cao</text>';
+      s+='<text x="120" y="446" text-anchor="middle" font-size="10" fill="#9a988f">← sau (xe vượt / lùi đỗ)</text>';
+    }
+    var faces=[];
+    BOX.forEach(function(b){
+      var C=[[b[0],b[2],b[4]],[b[1],b[2],b[4]],[b[1],b[3],b[4]],[b[0],b[3],b[4]],
+             [b[0],b[2],b[5]],[b[1],b[2],b[5]],[b[1],b[3],b[5]],[b[0],b[3],b[5]]].map(function(c){return P({x:c[0],y:c[1],z:c[2]});});
+      FI.forEach(function(f){var pts=[C[f[0]],C[f[1]],C[f[2]],C[f[3]]], d=(pts[0].d+pts[1].d+pts[2].d+pts[3].d)/4;
+        faces.push({d:d,str:'<polygon points="'+pts.map(function(q){return q.sx.toFixed(1)+','+q.sy.toFixed(1);}).join(' ')+'" fill="'+shade(b[6],f[4])+'" stroke="#4a535c" stroke-width="0.5"/>'});});
+    });
+    faces.sort(function(a,b){return a.d-b.d;}); faces.forEach(function(f){s+=f.str;});
+    if(fovEl.checked){ SEN.forEach(function(se){ s+='<polygon points="'+beamPts(se)+'" fill="'+TP[se.t].fill+'"/>'; }); }
+    var R = mode==='rng'?3:4.5;
+    var dots=SEN.map(function(se){var q=P({x:se.x,y:se.y,z:se.z});return{d:q.d,se:se,q:q};});
+    dots.sort(function(a,b){return a.d-b.d;});
+    dots.forEach(function(o){ s+='<circle cx="'+o.q.sx.toFixed(1)+'" cy="'+o.q.sy.toFixed(1)+'" r="'+R+'" fill="'+TP[o.se.t].col+'" stroke="#fff" stroke-width="1.1"/>'; });
+    if(mode==='iso'||mode==='top'){
+      var cen={}; SEN.forEach(function(se){var k=se.cl; if(!cen[k])cen[k]={x:0,y:0,z:0,n:0,t:se.t}; cen[k].x+=se.x;cen[k].y+=se.y;cen[k].z+=se.z;cen[k].n++;});
+      Object.keys(cen).forEach(function(k){var c=cen[k], q=P({x:c.x/c.n,y:c.y/c.n,z:c.z/c.n+18});
+        s+='<circle cx="'+q.sx.toFixed(1)+'" cy="'+q.sy.toFixed(1)+'" r="10" fill="'+TP[c.t].col+'" stroke="#fff" stroke-width="1.5"/>';
+        s+='<text x="'+q.sx.toFixed(1)+'" y="'+(q.sy+4).toFixed(1)+'" text-anchor="middle" font-size="12" font-weight="700" fill="#fff">'+k+'</text>';});
+    }
+    var hint = mode==='rng'?'Phạm vi (vòng=mét) · VB22A ~20m · siêu âm ~4m'
+            : (mode==='top'?'nhìn từ trên · sau: 3 cột VB22A + 3 US lùi/đỗ'
+            : (mode==='side'?'nhìn bên · trước 3 tầng, sau 2 tầng'
+            : 'phối cảnh 3/4 · trước 3 tầng · sau 2 tầng + 3 US lùi'));
+    s+='<text x="14" y="22" font-size="11" fill="#888">'+hint+'</text>';
+    cv.innerHTML=s;
+  }
+  // Hook cho OrangePi sau nay: doi mau cum dang phat hien vat that
+  window.leadSetActive=function(cl,on){};
+  function pick(k){for(var m in B)B[m].classList.toggle('on',m===k);render();}
+  for(var k in B){(function(kk){B[kk].onclick=function(){pick(kk);};})(k);}
+  yawEl.oninput=render; fovEl.onchange=render;
+  pick('iso');
+})();
+</script>
+</body>
+</html>
